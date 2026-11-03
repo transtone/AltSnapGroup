@@ -1,0 +1,478 @@
+//! TOML config: load, save, convert to engine view.
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PatternFile {
+    Exact(String),
+    Glob(String),
+    Regex(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowTraitMaskFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_topmost: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_cloaked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_tool: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_owned: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuleFile {
+    #[serde(default)]
+    pub match_process: Option<PatternFile>,
+    #[serde(default)]
+    pub match_class: Option<PatternFile>,
+    #[serde(default)]
+    pub match_title: Option<PatternFile>,
+    #[serde(default)]
+    pub match_traits: WindowTraitMaskFile,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileConfig {
+    #[serde(default)]
+    pub activation: Activation,
+    #[serde(default)]
+    pub behavior: Behavior,
+    #[serde(default)]
+    pub resize: Resize,
+    #[serde(default)]
+    pub exclude: Exclude,
+    #[serde(default)]
+    pub snap: SnapFile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<RuleFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Activation {
+    pub modifier: String,
+}
+impl Default for Activation {
+    fn default() -> Self {
+        Self {
+            modifier: "alt".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Behavior {
+    pub enable_move: bool,
+    pub enable_resize: bool,
+    pub raise_on_drag: bool,
+    pub restore_maximized_on_move: bool,
+    pub middle_click_action: String,
+}
+impl Default for Behavior {
+    fn default() -> Self {
+        Self {
+            enable_move: true,
+            enable_resize: true,
+            raise_on_drag: false,
+            restore_maximized_on_move: true,
+            middle_click_action: "none".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Resize {
+    pub center_mode: String, // "symmetric" only in v0.1
+    pub center_fraction: f32,
+}
+impl Default for Resize {
+    fn default() -> Self {
+        Self {
+            center_mode: "symmetric".into(),
+            center_fraction: 1.0 / 3.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Exclude {
+    pub processes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ZoneTogglesFile {
+    pub top_maximize: bool,
+    pub bottom_maximize: bool,
+    pub left_half: bool,
+    pub right_half: bool,
+    pub top_left_quarter: bool,
+    pub top_right_quarter: bool,
+    pub bottom_left_quarter: bool,
+    pub bottom_right_quarter: bool,
+    pub left_third: bool,
+    pub middle_third: bool,
+    pub right_third: bool,
+}
+impl Default for ZoneTogglesFile {
+    fn default() -> Self {
+        Self {
+            top_maximize: true,
+            bottom_maximize: false,
+            left_half: true,
+            right_half: true,
+            top_left_quarter: true,
+            top_right_quarter: true,
+            bottom_left_quarter: true,
+            bottom_right_quarter: true,
+            left_third: false,
+            middle_third: false,
+            right_third: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SnapFile {
+    pub enabled: bool,
+    pub engage_distance_px: u32,
+    pub disengage_distance_px: u32,
+    pub preview_opacity: u8,
+    pub zones: ZoneTogglesFile,
+}
+impl Default for SnapFile {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            engage_distance_px: 24,
+            disengage_distance_px: 32,
+            preview_opacity: 0x99,
+            zones: ZoneTogglesFile::default(),
+        }
+    }
+}
+
+/// Runtime-only adapter configuration (not serialized to TOML).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdapterConfig {
+    pub preview_opacity: u8,
+}
+impl Default for AdapterConfig {
+    fn default() -> Self {
+        Self {
+            preview_opacity: 0x99,
+        }
+    }
+}
+
+/// Combined runtime configuration: engine-visible half + adapter-visible half.
+#[derive(Debug, Clone)]
+pub struct RuntimeConfig {
+    pub engine: EngineConfig,
+    pub adapter: AdapterConfig,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("toml parse error: {0}")]
+    Toml(#[from] toml::de::Error),
+    #[error("toml serialize error: {0}")]
+    TomlSer(#[from] toml::ser::Error),
+    #[error("invalid config: {0}")]
+    Invalid(String),
+}
+
+pub fn load_from_str(s: &str) -> Result<FileConfig, ConfigError> {
+    Ok(toml::from_str(s)?)
+}
+
+pub fn load_from_path(path: &Path) -> Result<FileConfig, ConfigError> {
+    if !path.exists() {
+        let default = FileConfig::default();
+        save_to_path(path, &default)?;
+        return Ok(default);
+    }
+    let s = std::fs::read_to_string(path)?;
+    load_from_str(&s)
+}
+
+pub fn save_to_path(path: &Path, cfg: &FileConfig) -> Result<(), ConfigError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let s = toml::to_string_pretty(cfg)?;
+    std::fs::write(path, s)?;
+    Ok(())
+}
+
+/// Resolve the default config path: `%APPDATA%\Alt3rSnap\config.toml` on Windows,
+/// or `~/.config/alt3rsnap/config.toml` on other systems (used only for unit tests).
+pub fn default_config_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(dirs) = directories::ProjectDirs::from("com", "Alt3rSnap", "Alt3rSnap") {
+            return dirs.config_dir().join("config.toml");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(dirs) = directories::ProjectDirs::from("com", "Alt3rSnap", "Alt3rSnap") {
+            return dirs.config_dir().join("config.toml");
+        }
+    }
+    PathBuf::from("config.toml")
+}
+
+use crate::engine::config::{EngineConfig, SnapEngineConfig, ZoneToggles};
+use crate::engine::modifiers::{ModMatcher, Modifiers};
+use crate::engine::policy::ActivationPolicy;
+use crate::engine::rules::{Pattern, RuleAction, WindowRule, WindowTraitMask};
+use regex::RegexBuilder;
+
+impl FileConfig {
+    pub fn to_runtime_config(&self) -> Result<RuntimeConfig, ConfigError> {
+        let mut engine = self.to_engine_config()?;
+        engine.snap = build_snap_engine_config(&self.snap);
+        let adapter = AdapterConfig {
+            preview_opacity: self.snap.preview_opacity,
+        };
+        Ok(RuntimeConfig { engine, adapter })
+    }
+
+    pub fn to_engine_config(&self) -> Result<EngineConfig, ConfigError> {
+        let arm_mods = parse_modifier_string(&self.activation.modifier)
+            .ok_or_else(|| toml_err(format!("unknown modifier: {}", self.activation.modifier)))?;
+
+        let policy = ActivationPolicy {
+            arm: ModMatcher {
+                required: arm_mods,
+                // Keep the default's forbidden (WIN) only if Alt is the required; otherwise no forbidden.
+                forbidden: if arm_mods == Modifiers::ALT {
+                    Modifiers::WIN
+                } else {
+                    Modifiers::NONE
+                },
+                exact: false,
+            },
+            ..Default::default()
+        };
+
+        let mut rules: Vec<WindowRule> = self
+            .exclude
+            .processes
+            .iter()
+            .map(|p| WindowRule {
+                match_process: Some(Pattern::exact(p.clone())),
+                match_class: None,
+                match_title: None,
+                match_traits: WindowTraitMask::default(),
+                action: RuleAction::Exclude,
+            })
+            .collect();
+
+        for r in &self.rules {
+            if let Some(rule) = bridge_rule(r) {
+                rules.push(rule);
+            }
+        }
+
+        let center_mode = parse_center_mode(&self.resize.center_mode);
+        let middle_click_action = parse_middle_click_action(&self.behavior.middle_click_action);
+
+        Ok(EngineConfig {
+            enabled: true,
+            enable_move: self.behavior.enable_move,
+            enable_resize: self.behavior.enable_resize,
+            raise_on_drag: self.behavior.raise_on_drag,
+            restore_maximized_on_move: self.behavior.restore_maximized_on_move,
+            policy,
+            rules,
+            center_fraction: self.resize.center_fraction.clamp(0.0, 1.0),
+            center_mode,
+            middle_click_action,
+            snap: SnapEngineConfig::default(),
+        })
+    }
+}
+
+fn build_snap_engine_config(f: &SnapFile) -> SnapEngineConfig {
+    let engage = f.engage_distance_px.min(256);
+    let disengage = f.disengage_distance_px.min(256).max(engage);
+    if disengage != f.disengage_distance_px {
+        tracing::warn!(
+            engage = engage,
+            disengage_in = f.disengage_distance_px,
+            disengage_out = disengage,
+            "snap.disengage_distance_px < engage_distance_px — clamping up",
+        );
+    }
+    if engage != f.engage_distance_px {
+        tracing::warn!(
+            engage_in = f.engage_distance_px,
+            engage_out = engage,
+            "snap.engage_distance_px > 256 — clamping down",
+        );
+    }
+    SnapEngineConfig {
+        enabled: f.enabled,
+        engage_px: engage,
+        disengage_px: disengage,
+        zones: ZoneToggles {
+            top_maximize: f.zones.top_maximize,
+            bottom_maximize: f.zones.bottom_maximize,
+            left_half: f.zones.left_half,
+            right_half: f.zones.right_half,
+            top_left_quarter: f.zones.top_left_quarter,
+            top_right_quarter: f.zones.top_right_quarter,
+            bottom_left_quarter: f.zones.bottom_left_quarter,
+            bottom_right_quarter: f.zones.bottom_right_quarter,
+            left_third: f.zones.left_third,
+            middle_third: f.zones.middle_third,
+            right_third: f.zones.right_third,
+        },
+    }
+}
+
+fn parse_modifier_string(s: &str) -> Option<Modifiers> {
+    let mut result = Modifiers::NONE;
+    for part in s.split('+').map(|p| p.trim().to_lowercase()) {
+        let m = match part.as_str() {
+            "alt" => Modifiers::ALT,
+            "ctrl" => Modifiers::CTRL,
+            "shift" => Modifiers::SHIFT,
+            "win" => Modifiers::WIN,
+            _ => return None,
+        };
+        result = result.with(m);
+    }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+fn parse_center_mode(s: &str) -> crate::engine::config::CenterMode {
+    use crate::engine::config::CenterMode as C;
+    match s.trim().to_ascii_lowercase().as_str() {
+        "" | "symmetric" => C::Symmetric,
+        "bottom_right" => C::BottomRight,
+        "move" => C::Move,
+        other => {
+            tracing::warn!(
+                value = %other,
+                "unknown resize.center_mode; defaulting to \"symmetric\""
+            );
+            C::Symmetric
+        }
+    }
+}
+
+fn parse_middle_click_action(s: &str) -> crate::engine::config::MiddleClickAction {
+    use crate::engine::config::MiddleClickAction as M;
+    match s.trim().to_ascii_lowercase().as_str() {
+        "" | "none" => M::None,
+        "toggle_maximize" => M::ToggleMaximize,
+        other => {
+            tracing::warn!(
+                value = %other,
+                "unknown behavior.middle_click_action; defaulting to \"none\""
+            );
+            M::None
+        }
+    }
+}
+
+fn bridge_pattern_process(p: &PatternFile) -> Option<Pattern> {
+    match p {
+        PatternFile::Exact(s) => Some(Pattern::exact(s.clone())),
+        PatternFile::Glob(s) => Some(Pattern::glob(s.clone())),
+        PatternFile::Regex(s) => match RegexBuilder::new(s).case_insensitive(true).build() {
+            Ok(r) => Some(Pattern::regex(r)),
+            Err(_) => {
+                tracing::warn!(pattern = %s, "process regex compile error, dropping rule");
+                None
+            }
+        },
+    }
+}
+
+fn bridge_pattern_text(p: &PatternFile) -> Option<Pattern> {
+    match p {
+        PatternFile::Exact(s) => Some(Pattern::exact(s.clone())),
+        PatternFile::Glob(s) => Some(Pattern::glob(s.clone())),
+        PatternFile::Regex(s) => match regex::Regex::new(s) {
+            Ok(r) => Some(Pattern::regex(r)),
+            Err(_) => {
+                tracing::warn!(pattern = %s, "regex compile error, dropping rule");
+                None
+            }
+        },
+    }
+}
+
+fn bridge_rule(r: &RuleFile) -> Option<WindowRule> {
+    let has_matcher = r.match_process.is_some()
+        || r.match_class.is_some()
+        || r.match_title.is_some()
+        || r.match_traits.require_topmost.is_some()
+        || r.match_traits.require_cloaked.is_some()
+        || r.match_traits.require_tool.is_some()
+        || r.match_traits.require_owned.is_some();
+    if !has_matcher {
+        return None;
+    }
+
+    let action = match r.action.trim().to_ascii_lowercase().as_str() {
+        "exclude" => RuleAction::Exclude,
+        other => {
+            tracing::warn!(action = %other, "unsupported rule action, dropping rule");
+            return None;
+        }
+    };
+
+    let match_process = match &r.match_process {
+        None => None,
+        Some(p) => Some(bridge_pattern_process(p)?),
+    };
+    let match_class = match &r.match_class {
+        None => None,
+        Some(p) => Some(bridge_pattern_text(p)?),
+    };
+    let match_title = match &r.match_title {
+        None => None,
+        Some(p) => Some(bridge_pattern_text(p)?),
+    };
+
+    let match_traits = WindowTraitMask {
+        require_topmost: r.match_traits.require_topmost,
+        require_cloaked: r.match_traits.require_cloaked,
+        require_tool: r.match_traits.require_tool,
+        require_owned: r.match_traits.require_owned,
+    };
+
+    Some(WindowRule {
+        match_process,
+        match_class,
+        match_title,
+        match_traits,
+        action,
+    })
+}
+
+fn toml_err(msg: String) -> ConfigError {
+    ConfigError::Invalid(msg)
+}

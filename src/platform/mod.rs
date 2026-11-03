@@ -1,5 +1,5 @@
 #[cfg(target_os = "windows")]
-mod windows;
+pub(crate) mod windows;
 
 #[cfg(target_os = "macos")]
 mod macos;

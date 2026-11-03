@@ -19,6 +19,86 @@ static LAST_FG_SYNC_MS: AtomicIsize = AtomicIsize::new(0);
 static START_INSTANT: OnceLock<Instant> = OnceLock::new();
 static MOVE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static MOVE_CACHE_DIRTY: AtomicBool = AtomicBool::new(false);
+static ALT_MOVE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static ALT_MOVE: Mutex<Option<AltMove>> = Mutex::new(None);
+static MOVE_SERIAL: Mutex<()> = Mutex::new(());
+
+struct AltMove {
+    target: isize,
+    origin: (i32, i32),
+    siblings: Vec<(isize, i32, i32)>,
+}
+
+fn alt_sibling_position(origin: (i32, i32), target: (i32, i32), sibling: (i32, i32)) -> (i32, i32) {
+    (sibling.0 + target.0 - origin.0, sibling.1 + target.1 - origin.1)
+}
+
+#[cfg(test)]
+mod alt_move_tests {
+    use super::alt_sibling_position;
+
+    #[test]
+    fn sibling_follows_actual_target_displacement() {
+        assert_eq!(alt_sibling_position((-100, 30), (25, -20), (50, 60)), (175, 10));
+        assert_eq!(alt_sibling_position((-100, 30), (-100, 30), (50, 60)), (50, 60));
+    }
+}
+
+pub fn alt_move_begin(target: isize) {
+    let Ok(_guard) = MOVE_SERIAL.lock() else { return; };
+    ALT_MOVE_ACTIVE.store(true, Ordering::SeqCst);
+    MOVE_CACHE_DIRTY.store(true, Ordering::SeqCst);
+    let session = (|| {
+        let gm = GROUP_MANAGER.get()?.lock().ok()?;
+        let group = gm.find_group_for_hwnd(target)?;
+        if !gm.movement_enabled(group) { return None; }
+        let siblings = gm.get_sibling_hwnds(target);
+        drop(gm);
+        let origin = get_window_pos(HWND(target as *mut _))?;
+        let siblings = siblings.into_iter().filter_map(|h| {
+            let hwnd = HWND(h as *mut _);
+            if unsafe { !IsWindow(hwnd).as_bool() || IsIconic(hwnd).as_bool() } { return None; }
+            get_window_pos(hwnd).map(|(x, y)| (h, x, y))
+        }).collect();
+        Some(AltMove { target, origin, siblings })
+    })();
+    if let Ok(mut state) = ALT_MOVE.lock() { *state = session; }
+}
+
+pub fn alt_move_update(target: isize) {
+    let Ok(state) = ALT_MOVE.lock() else { return; };
+    let Some(session) = state.as_ref().filter(|s| s.target == target) else { return; };
+    let Some(gm) = GROUP_MANAGER.get() else { return; };
+    let Ok(gm) = gm.lock() else { return; };
+    let Some(group) = gm.find_group_for_hwnd(target) else { return; };
+    if !gm.movement_enabled(group) { return; }
+    let current_siblings = gm.get_sibling_hwnds(target);
+    drop(gm);
+    let Some((x, y)) = get_window_pos(HWND(target as *mut _)) else { return; };
+    MOVE_IN_PROGRESS.store(true, Ordering::SeqCst);
+    unsafe {
+        for &(handle, sx, sy) in &session.siblings {
+            if !current_siblings.contains(&handle) { continue; }
+            let hwnd = HWND(handle as *mut _);
+            if !IsWindow(hwnd).as_bool() || IsIconic(hwnd).as_bool() { continue; }
+            let mut rect = RECT::default();
+            if GetWindowRect(hwnd, &mut rect).is_err() { continue; }
+            let (tx, ty) = alt_sibling_position(session.origin, (x, y), (sx, sy));
+            let (tx, ty) = reachable_position(hwnd, tx, ty, rect.right - rect.left);
+            if let Err(error) = SetWindowPos(hwnd, None, tx, ty, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) {
+                log::warn!("Alt group move failed for {handle}: {error}");
+            }
+        }
+    }
+    MOVE_IN_PROGRESS.store(false, Ordering::SeqCst);
+}
+
+pub fn alt_move_end(target: isize) {
+    alt_move_update(target);
+    if let Ok(mut state) = ALT_MOVE.lock() { *state = None; }
+    MOVE_CACHE_DIRTY.store(true, Ordering::SeqCst);
+    ALT_MOVE_ACTIVE.store(false, Ordering::SeqCst);
+}
 
 const FG_DEBOUNCE_MS: isize = 150;
 
@@ -299,8 +379,12 @@ fn move_sync_loop(gm: Arc<Mutex<GroupManager>>) {
     loop {
         std::thread::sleep(std::time::Duration::from_millis(8));
 
+        let Ok(_guard) = MOVE_SERIAL.lock() else { continue; };
+        if ALT_MOVE_ACTIVE.load(Ordering::SeqCst) { continue; }
+
         if MOVE_CACHE_DIRTY.swap(false, Ordering::SeqCst) {
             tracked_fg = 0; offsets.clear(); drag_active = false; drag_sibling_start.clear();
+            drop(_guard);
             std::thread::sleep(std::time::Duration::from_millis(50));
             continue;
         }

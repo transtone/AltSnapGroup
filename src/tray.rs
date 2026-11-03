@@ -30,6 +30,9 @@ const ID_HOTKEY_SETTINGS: &str = "hotkey_settings";
 const ID_TOGGLE_LANG: &str = "toggle_lang";
 const ID_TOGGLE_AUTOSTART: &str = "toggle_autostart";
 const ID_QUIT: &str = "quit";
+#[cfg(windows)] const ID_SNAP_TOGGLE: &str = "snap_toggle";
+#[cfg(windows)] const ID_SNAP_RELOAD: &str = "snap_reload";
+#[cfg(windows)] const ID_SNAP_CONFIG: &str = "snap_config";
 
 fn create_icon() -> tray_icon::Icon {
     let size = 16u32;
@@ -99,6 +102,12 @@ fn build_menu(settings: &Settings, gm: &GroupManager, registered: [bool; 4]) -> 
     };
     let _ = menu.append(&MenuItem::with_id(ID_HOTKEY_SETTINGS, settings_label, true, None));
     let _ = menu.append(&MenuItem::with_id(ID_TOGGLE_LANG, t("menu.lang"), true, None));
+    #[cfg(windows)] {
+        let zh = i18n::get_lang() == i18n::Lang::Zh;
+        let _ = menu.append(&MenuItem::with_id(ID_SNAP_TOGGLE, if zh { "切换 Alt 窗口操作" } else { "Toggle Alt window controls" }, true, None));
+        let _ = menu.append(&MenuItem::with_id(ID_SNAP_RELOAD, if zh { "重新加载 Alt 配置" } else { "Reload Alt configuration" }, true, None));
+        let _ = menu.append(&MenuItem::with_id(ID_SNAP_CONFIG, if zh { "编辑 Alt 配置" } else { "Edit Alt configuration" }, true, None));
+    }
     let autostart_label = if i18n::get_lang() == i18n::Lang::Zh { "开机自启" } else { "Auto Start" };
     let autostart_check = CheckMenuItem::with_id(ID_TOGGLE_AUTOSTART,
         autostart_label, true, settings.auto_start, None);
@@ -210,7 +219,7 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, _: &ActiveEventLoop) { info!("Tray event loop resumed"); }
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
 
-    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         while let Ok(ev) = self.hotkey_events.try_recv() {
             if ev.state == global_hotkey::HotKeyState::Pressed && Some(ev.id) == self.hk_bind_id {
                 self.lasso_bind();
@@ -227,6 +236,23 @@ impl ApplicationHandler for App {
         while let Ok(ev) = self.menu_events.try_recv() {
             info!("Menu action: {}", ev.id().0);
             match ev.id().0.as_str() {
+                #[cfg(windows)] ID_SNAP_TOGGLE => crate::snap_tool_window::send(crate::snap_tool_window::TOGGLE),
+                #[cfg(windows)] ID_SNAP_RELOAD => crate::snap_tool_window::send(crate::snap_tool_window::RELOAD),
+                #[cfg(windows)] ID_SNAP_CONFIG => {
+                    let path = crate::snap_config::default_config_path();
+                    if !path.exists() {
+                        if let Err(error) = crate::snap_config::save_to_path(&path, &crate::snap_config::FileConfig::default()) {
+                            error!("Could not create Alt configuration: {}", error);
+                            continue;
+                        }
+                    }
+                    let wide: Vec<u16> = path.to_string_lossy().encode_utf16().chain(Some(0)).collect();
+                    unsafe {
+                        windows::Win32::UI::Shell::ShellExecuteW(None, windows::core::w!("open"),
+                            windows::core::PCWSTR(wide.as_ptr()), windows::core::PCWSTR::null(),
+                            windows::core::PCWSTR::null(), SW_SHOWNORMAL);
+                    }
+                },
                 ID_LASSO => self.lasso_bind(),
                 ID_PICK_WINDOWS => {
                     self.unregister_hotkeys();
@@ -307,7 +333,7 @@ impl ApplicationHandler for App {
                     }
                     self.rebuild_tray();
                 }
-                ID_QUIT => std::process::exit(0),
+                ID_QUIT => { event_loop.exit(); return; },
                 _ => {}
             }
         }

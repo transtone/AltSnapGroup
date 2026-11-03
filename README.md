@@ -106,6 +106,12 @@ cargo build --release
 
 ## 中文
 
+### Alt 窗口操作（Windows）
+
+按住 Alt 并用左键拖动可移动窗口，右键拖动可调整大小。绑定组启用同步移动时，Alt 移动也会带动组内窗口。托盘菜单可切换此功能、编辑并重新加载配置；配置兼容 `%APPDATA%/Alt3rSnap/config.toml`。操作管理员权限窗口时需要以管理员身份启动本程序。
+
+Alt 窗口操作代码基于 [Alt3rSnap](https://github.com/avymiatnin/alt3rsnap)；其项目声明使用 MIT 或 Apache-2.0 许可证。发布前需核对上游完整许可文本及署名要求。
+
 ### 这是什么？
 
 AlwaysBindWindow 可以将**不同应用**的窗口绑定成一组，像同一个软件的窗口一样联动：

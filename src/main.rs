@@ -1,6 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod group;
+mod engine;
+mod snap_config;
+#[cfg(windows)] mod snap_hook;
+#[cfg(windows)] mod snap_fullscreen;
+#[cfg(windows)] mod snap_adapter;
+#[cfg(windows)] mod snap_tool_window;
+#[cfg(windows)] mod snap_overlay;
+#[cfg(windows)] mod monitors;
+#[cfg(windows)] mod win_api;
+#[cfg(windows)] mod win_api_trait;
+#[cfg(windows)] mod swallow_latch;
 mod platform;
 mod tray;
 mod overlay;
@@ -86,6 +97,50 @@ fn main() {
         settings::format_hotkey(&s.hotkey_unbind_cursor),
         settings::format_hotkey(&s.hotkey_unbind_all));
 
+    #[cfg(windows)]
+    let (snap_ready_tx, snap_ready_rx) = std::sync::mpsc::sync_channel(1);
+    #[cfg(windows)]
+    let snap_thread = std::thread::spawn(move || {
+        let path = snap_config::default_config_path();
+        match snap_config::load_from_path(&path).and_then(|c| c.to_runtime_config()) {
+            Ok(config) => {
+                snap_hook::ENGINE.with(|e| { e.borrow_mut().set_config(config.engine); });
+                snap_overlay::set_opacity(config.adapter.preview_opacity);
+            }
+            Err(e) => log::error!("Snap configuration: {}", e),
+        }
+        if let Err(e) = snap_tool_window::create() {
+            log::error!("Snap window: {}", e);
+            return;
+        }
+        unsafe {
+            if let Ok(module) = windows::Win32::System::LibraryLoader::GetModuleHandleW(None) {
+                snap_overlay::register_class(module.into());
+            }
+        }
+        if let Err(e) = snap_hook::install() {
+            log::error!("Snap hooks: {}", e);
+            return;
+        }
+        snap_fullscreen::install();
+        let _ = snap_ready_tx.send(());
+        snap_tool_window::run_pump();
+        snap_hook::ENGINE.with(|engine| {
+            let mut engine = engine.borrow_mut();
+            if !matches!(engine.state(), crate::engine::state::State::Disabled) {
+                let actions = engine.handle(crate::engine::state::Event::ToggleEnable);
+                drop(engine);
+                snap_adapter::apply_actions(&actions);
+            }
+        });
+        snap_fullscreen::uninstall();
+        snap_hook::uninstall();
+    });
+    #[cfg(windows)]
+    if snap_ready_rx.recv().is_err() {
+        log::error!("Alt window controls failed to start");
+    }
+
     let group_manager = Arc::new(Mutex::new(GroupManager::new()));
 
     let gm_clone = Arc::clone(&group_manager);
@@ -97,6 +152,18 @@ fn main() {
 
     if let Err(e) = tray::run_tray(group_manager, s) {
         show_startup_error(&format!("{}\n{}", i18n::t("msg.startup_error"), e));
+    }
+    #[cfg(windows)]
+    {
+        unsafe {
+            let hwnd = snap_tool_window::hwnd();
+            if !hwnd.0.is_null() {
+                let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    hwnd, windows::Win32::UI::WindowsAndMessaging::WM_CLOSE,
+                    windows::Win32::Foundation::WPARAM(0), windows::Win32::Foundation::LPARAM(0));
+            }
+        }
+        let _ = snap_thread.join();
     }
     // The monitor runs indefinitely. Joining it after a tray startup failure
     // leaves an invisible process alive, potentially still holding hotkeys.
