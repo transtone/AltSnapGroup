@@ -37,7 +37,7 @@ pub fn t(key: &str) -> &'static str {
     let zh = get_lang() == Lang::Zh;
     match key {
         // App
-        "app.name" => if zh { "窗口绑定助手" } else { "AlwaysBindWindow" },
+        "app.name" => "AltSnapGroup",
         "app.ready" => if zh { "  就绪！快捷键已激活。" } else { "  Ready! Hotkeys active." },
 
         // Hotkeys

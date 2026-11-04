@@ -7,11 +7,6 @@ pub struct PickerResult {
     pub movement: MovementMode,
 }
 
-#[cfg(target_os = "windows")]
-#[path = "overlay_windows.rs"]
-mod win_impl;
-#[cfg(target_os = "windows")]
-pub use win_impl::run_picker_overlay;
 
 #[cfg(not(target_os = "windows"))]
 pub fn run_picker_overlay(_global_sync_move: bool) -> PickerResult {

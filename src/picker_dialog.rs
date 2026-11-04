@@ -339,7 +339,7 @@ pub fn show_window_picker(global_sync_move: bool) -> PickerResult {
             let _ = MessageBoxW(
                 None,
                 PCWSTR(wide(t("picker.error")).as_ptr()),
-                w!("AlwaysBindWindow"),
+                w!("AltSnapGroup"),
                 MB_OK | MB_ICONERROR,
             );
             return cancelled();
@@ -449,7 +449,7 @@ pub fn show_window_picker(global_sync_move: bool) -> PickerResult {
             let _ = MessageBoxW(
                 hwnd,
                 PCWSTR(wide(t("picker.error")).as_ptr()),
-                w!("AlwaysBindWindow"),
+                w!("AltSnapGroup"),
                 MB_OK | MB_ICONERROR,
             );
         } else {

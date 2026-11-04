@@ -6,9 +6,11 @@ use crate::hotkey_dialog;
 use log::{info, error};
 use std::sync::{mpsc, Arc, Mutex};
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, CheckMenuItem, Submenu},
+    menu::{Menu, MenuEvent, MenuItem, CheckMenuItem, Submenu},
     TrayIconBuilder,
 };
+#[cfg(not(windows))]
+use tray_icon::menu::PredefinedMenuItem;
 use global_hotkey::{GlobalHotKeyManager, GlobalHotKeyEvent};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -21,6 +23,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const ID_LASSO: &str = "lasso";
+#[cfg(windows)] const ID_AUTO_DETECT: &str = "auto_detect";
 const ID_PICK_WINDOWS: &str = "pick_windows";
 const ID_SYNC_MOVE: &str = "sync_move";
 const ID_RECOVER: &str = "recover_windows";
@@ -30,7 +33,7 @@ const ID_HOTKEY_SETTINGS: &str = "hotkey_settings";
 const ID_TOGGLE_LANG: &str = "toggle_lang";
 const ID_TOGGLE_AUTOSTART: &str = "toggle_autostart";
 const ID_QUIT: &str = "quit";
-#[cfg(windows)] const ID_SNAP_TOGGLE: &str = "snap_toggle";
+
 #[cfg(windows)] const ID_SNAP_RELOAD: &str = "snap_reload";
 #[cfg(windows)] const ID_SNAP_CONFIG: &str = "snap_config";
 #[cfg(windows)] const ID_RESTART_ELEVATED: &str = "restart_elevated";
@@ -53,7 +56,41 @@ fn create_icon() -> tray_icon::Icon {
 }
 
 /// Build the tray menu with current language and settings
-fn build_menu(settings: &Settings, gm: &GroupManager, registered: [bool; 4]) -> Menu {
+fn build_menu(settings: &Settings, gm: &GroupManager, _registered: [bool; 4]) -> Menu {
+    #[cfg(windows)]
+    {
+        let zh = i18n::get_lang() == i18n::Lang::Zh;
+        let menu = Menu::new();
+        let _ = menu.append(&CheckMenuItem::with_id(ID_AUTO_DETECT, if zh { "自动检测贴靠窗口" } else { "Automatically detect snapped windows" }, true, settings.auto_detect, None));
+        let label = format!("{} ({})", if zh { "立即检测" } else { "Detect now" }, settings::format_hotkey(&settings.hotkey_bind));
+        let _ = menu.append(&MenuItem::with_id(ID_LASSO, label, !settings.auto_detect, None));
+        let groups_menu = Submenu::new(if zh { "绑定组" } else { "Window groups" }, true);
+        if gm.groups.is_empty() {
+            let _ = groups_menu.append(&MenuItem::new(if zh { "暂无绑定组" } else { "No groups" }, false, None));
+        }
+        for (index, group) in gm.groups.iter().enumerate() {
+            let members = Submenu::new(format!("{} {}", if zh { "桌面" } else { "Desktop" }, index + 1), true);
+            for (&handle, id) in &gm.active_bindings {
+                if id == &group.id {
+                    let title = crate::platform::windows::window_label(handle).chars().take(100).collect::<String>().replace('&', "&&");
+                    let _ = members.append(&MenuItem::new(title, false, None));
+                }
+            }
+            let _ = groups_menu.append(&members);
+        }
+        let _ = menu.append(&groups_menu);
+        let _ = menu.append(&MenuItem::with_id(ID_RECOVER, t("menu.recover"), true, None));
+        let _ = menu.append(&MenuItem::with_id(ID_TOGGLE_LANG, t("menu.lang"), true, None));
+        let _ = menu.append(&MenuItem::with_id(ID_SNAP_RELOAD, if zh { "重新加载 Alt 配置" } else { "Reload Alt configuration" }, true, None));
+        let _ = menu.append(&MenuItem::with_id(ID_SNAP_CONFIG, if zh { "编辑 Alt 配置" } else { "Edit Alt configuration" }, true, None));
+        let _ = menu.append(&MenuItem::with_id(ID_RESTART_ELEVATED, if zh { "以管理员身份重新启动" } else { "Restart as administrator" }, true, None));
+        let _ = menu.append(&CheckMenuItem::with_id(ID_TOGGLE_AUTOSTART, if zh { "开机自启" } else { "Auto Start" }, true, settings.auto_start, None));
+        let _ = menu.append(&MenuItem::with_id(ID_QUIT, t("menu.quit"), true, None));
+        menu
+    }
+    #[cfg(not(windows))]
+    {
+    let registered = _registered;
     let display = |config: &settings::HotkeyConfig, active: bool| {
         let label = settings::format_hotkey(config);
         if active { label } else { format!("{} · {}", label, t("hk.unavailable")) }
@@ -105,7 +142,6 @@ fn build_menu(settings: &Settings, gm: &GroupManager, registered: [bool; 4]) -> 
     let _ = menu.append(&MenuItem::with_id(ID_TOGGLE_LANG, t("menu.lang"), true, None));
     #[cfg(windows)] {
         let zh = i18n::get_lang() == i18n::Lang::Zh;
-        let _ = menu.append(&MenuItem::with_id(ID_SNAP_TOGGLE, if zh { "切换 Alt 窗口操作" } else { "Toggle Alt window controls" }, true, None));
         let _ = menu.append(&MenuItem::with_id(ID_SNAP_RELOAD, if zh { "重新加载 Alt 配置" } else { "Reload Alt configuration" }, true, None));
         let _ = menu.append(&MenuItem::with_id(ID_SNAP_CONFIG, if zh { "编辑 Alt 配置" } else { "Edit Alt configuration" }, true, None));
         let _ = menu.append(&MenuItem::with_id(ID_RESTART_ELEVATED, if zh { "以管理员身份重新启动" } else { "Restart as administrator" }, true, None));
@@ -117,10 +153,15 @@ fn build_menu(settings: &Settings, gm: &GroupManager, registered: [bool; 4]) -> 
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&MenuItem::with_id(ID_QUIT, t("menu.quit"), true, None));
     menu
+    }
 }
 
 /// Build tooltip string with current language
 fn build_tooltip(settings: &Settings) -> String {
+    #[cfg(windows)]
+    { format!("{} · {}", t("app.name"), settings::format_hotkey(&settings.hotkey_bind)) }
+    #[cfg(not(windows))]
+    {
     let bind_str = settings::format_hotkey(&settings.hotkey_bind);
     let unbind_c_str = settings::format_hotkey(&settings.hotkey_unbind_cursor);
     let unbind_a_str = settings::format_hotkey(&settings.hotkey_unbind_all);
@@ -128,8 +169,10 @@ fn build_tooltip(settings: &Settings) -> String {
         t("app.name"), bind_str, t("hk.bind"),
         unbind_c_str, t("hk.unbind_cursor"),
         unbind_a_str, t("hk.unbind_all"))
+    }
 }
 
+#[cfg(not(windows))]
 fn do_lasso_bind(gm: &Arc<Mutex<GroupManager>>, settings: &Settings) {
     info!("Lasso bind triggered");
     let result = overlay::run_picker_overlay(settings.sync_move);
@@ -224,6 +267,8 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(windows)]
+        if crate::platform::windows::take_groups_changed() { self.rebuild_tray(); }
         while let Ok(ev) = self.hotkey_events.try_recv() {
             if ev.state == global_hotkey::HotKeyState::Pressed && Some(ev.id) == self.hk_bind_id {
                 self.lasso_bind();
@@ -240,14 +285,25 @@ impl ApplicationHandler for App {
         while let Ok(ev) = self.menu_events.try_recv() {
             info!("Menu action: {}", ev.id().0);
             match ev.id().0.as_str() {
-                #[cfg(windows)] ID_SNAP_TOGGLE => crate::snap_tool_window::send(crate::snap_tool_window::TOGGLE),
+                #[cfg(windows)] ID_AUTO_DETECT => {
+                    let mut updated = self.settings.clone();
+                    updated.auto_detect = !updated.auto_detect;
+                    if settings::save(&updated).is_ok() {
+                        self.settings = updated;
+                        crate::platform::windows::set_auto_detect(self.settings.auto_detect);
+                        self.unregister_hotkeys();
+                        self.register_hotkeys();
+                    }
+                    self.rebuild_tray();
+                },
+
                 #[cfg(windows)] ID_SNAP_RELOAD => crate::snap_tool_window::send(crate::snap_tool_window::RELOAD),
                 #[cfg(windows)] ID_RESTART_ELEVATED => {
                     let zh = i18n::get_lang() == i18n::Lang::Zh;
                     let prompt = if zh { "重启后当前窗口分组将丢失。是否继续？" } else { "Current window groups will be lost on restart. Continue?" };
                     let wide: Vec<u16> = prompt.encode_utf16().chain(Some(0)).collect();
                     let confirmed = unsafe { MessageBoxW(None, windows::core::PCWSTR(wide.as_ptr()),
-                        windows::core::w!("AlwaysBindWindow"), MB_YESNO | MB_ICONWARNING) == IDYES };
+                        windows::core::w!("AltSnapGroup"), MB_YESNO | MB_ICONWARNING) == IDYES };
                     if !confirmed { continue; }
                     match crate::elevate::restart_elevated() {
                         Ok(()) => { event_loop.exit(); return; }
@@ -366,7 +422,7 @@ impl App {
                 unsafe {
                     let message: Vec<u16> = t("msg.settings_error").encode_utf16().chain(Some(0)).collect();
                     let _ = MessageBoxW(None, windows::core::PCWSTR(message.as_ptr()),
-                        windows::core::w!("AlwaysBindWindow"), MB_OK | MB_ICONERROR);
+                        windows::core::w!("AltSnapGroup"), MB_OK | MB_ICONERROR);
                 }
             }
         }
@@ -378,10 +434,15 @@ impl App {
     }
 
     fn lasso_bind(&mut self) {
+        #[cfg(windows)]
+        { if !self.settings.auto_detect { crate::platform::windows::request_detection(); } }
+        #[cfg(not(windows))]
+        {
         self.unregister_hotkeys();
         do_lasso_bind(&self.gm, &self.settings);
         self.discard_pending_hotkeys();
         self.register_hotkeys();
+        }
     }
 
     fn unregister_hotkeys(&mut self) {
@@ -455,6 +516,11 @@ impl App {
 pub fn run_tray(gm: Arc<Mutex<GroupManager>>, settings: Settings) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
+    #[cfg(windows)]
+    {
+        let proxy = event_loop.create_proxy();
+        crate::platform::windows::set_groups_wake(move || { let _ = proxy.send_event(()); });
+    }
 
     // Native menu/hotkey callbacks do not wake winit's sleeping event loop.
     // Keep events in queues so nested native dialog pumps cannot reenter App,
@@ -523,6 +589,16 @@ fn register_configured_hotkeys<E: std::fmt::Display>(
     settings: &Settings,
     mut register: impl FnMut(global_hotkey::hotkey::HotKey) -> Result<(), E>,
 ) -> [Option<global_hotkey::hotkey::HotKey>; 4] {
+    #[cfg(windows)]
+    {
+        if settings.auto_detect { return [None, None, None, None]; }
+        let first = settings::build_hotkey(&settings.hotkey_bind).and_then(|hk| match register(hk) {
+            Ok(()) => Some(hk),
+            Err(error) => { error!("Hotkey unavailable: {}", error); None }
+        });
+        [first, None, None, None]
+    }
+    #[cfg(not(windows))]
     [&settings.hotkey_bind, &settings.hotkey_unbind_cursor,
         &settings.hotkey_unbind_all, &settings.hotkey_sync_move].map(|config| {
         let Some(hk) = settings::build_hotkey(config) else {
@@ -543,6 +619,7 @@ fn register_configured_hotkeys<E: std::fmt::Display>(
 mod tests {
     use super::*;
 
+    #[cfg(not(windows))]
     #[test]
     fn occupied_movement_shortcut_does_not_disable_bind_or_unbind() {
         let settings = Settings::default();
@@ -557,6 +634,7 @@ mod tests {
         assert_eq!(registered[0], settings::build_hotkey(&settings.hotkey_bind));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn registration_failure_does_not_skip_later_shortcuts() {
         let settings = Settings::default();
@@ -566,5 +644,19 @@ mod tests {
         assert_eq!(registered.map(|hk| hk.is_some()), [false, true, true, true]);
         let retried = register_configured_hotkeys(&settings, |_| Ok::<_, &str>(()));
         assert!(retried.iter().all(Option::is_some));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_detection_shortcut_is_registered() {
+        let mut settings = Settings::default();
+        let mut attempts = 0;
+        let automatic = register_configured_hotkeys(&settings, |_| { attempts += 1; Ok::<_, &str>(()) });
+        assert_eq!(attempts, 0);
+        assert!(automatic.iter().all(Option::is_none));
+        settings.auto_detect = false;
+        let registered = register_configured_hotkeys(&settings, |_| { attempts += 1; Ok::<_, &str>(()) });
+        assert_eq!(attempts, 1);
+        assert_eq!(registered.map(|hk| hk.is_some()), [true, false, false, false]);
     }
 }

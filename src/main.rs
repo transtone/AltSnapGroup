@@ -24,7 +24,7 @@ mod i18n;
 mod settings;
 mod hotkey_dialog;
 mod window_geometry;
-mod window_selection;
+#[cfg(any(not(windows), test))] mod window_selection;
 #[cfg(target_os = "windows")]
 mod native_ui;
 
@@ -61,7 +61,7 @@ fn show_startup_error(message: &str) {
         use windows::Win32::UI::WindowsAndMessaging::*;
         let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
         let _ = MessageBoxW(None, windows::core::PCWSTR(message.as_ptr()),
-            windows::core::w!("AlwaysBindWindow"), MB_OK | MB_ICONERROR);
+            windows::core::w!("AltSnapGroup"), MB_OK | MB_ICONERROR);
     }
 }
 
@@ -79,13 +79,15 @@ fn main() {
         Ok(Some(guard)) => guard,
         Ok(None) => return,
         Err(error) => {
-            show_startup_error(&format!("Could not initialize AlwaysBindWindow: {}", error));
+            show_startup_error(&format!("Could not initialize AltSnapGroup: {}", error));
             return;
         }
     };
 
     // Load settings
     let s = settings::load();
+    #[cfg(windows)]
+    platform::windows::set_auto_detect(s.auto_detect);
 
     // Set language
     match s.lang.as_str() {
@@ -94,7 +96,7 @@ fn main() {
         _ => i18n::set_lang(i18n::detect_system_lang()),
     }
 
-    info!("AlwaysBindWindow v{} starting...", env!("CARGO_PKG_VERSION"));
+    info!("AltSnapGroup v{} starting...", env!("CARGO_PKG_VERSION"));
     info!("Hotkeys: {} = Bind, {} = Unbind Group, {} = Unbind All",
         settings::format_hotkey(&s.hotkey_bind),
         settings::format_hotkey(&s.hotkey_unbind_cursor),

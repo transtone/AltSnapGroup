@@ -515,7 +515,7 @@ pub fn run_picker_overlay(global_sync_move: bool) -> PickerResult {
             let _ = MessageBoxW(
                 None,
                 PCWSTR(wide(t("msg.need2")).as_ptr()),
-                w!("AlwaysBindWindow"),
+                w!("AltSnapGroup"),
                 MB_OK,
             );
             return cancelled();

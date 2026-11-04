@@ -7,11 +7,101 @@ use std::time::Instant;
 use windows::Win32::Foundation::*;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
 use windows::Win32::System::Threading::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::{MonitorFromRect, GetMonitorInfoW, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED};
+use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
+
+static AUTO_DETECT: AtomicBool = AtomicBool::new(true);
+static DETECT_TX: OnceLock<std::sync::mpsc::Sender<()>> = OnceLock::new();
+static GROUPS_CHANGED: AtomicBool = AtomicBool::new(false);
+static GROUPS_WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+pub fn set_groups_wake(wake: impl Fn() + Send + Sync + 'static) {
+    let _ = GROUPS_WAKE.set(Box::new(wake));
+}
+
+pub fn take_groups_changed() -> bool { GROUPS_CHANGED.swap(false, Ordering::SeqCst) }
+
+fn notify_groups_changed() {
+    GROUPS_CHANGED.store(true, Ordering::SeqCst);
+    if let Some(wake) = GROUPS_WAKE.get() { wake(); }
+}
+
+pub fn window_label(handle: isize) -> String {
+    let hwnd = HWND(handle as *mut _);
+    let title = get_window_title(hwnd);
+    if title.is_empty() { format!("{} ({handle})", get_process_name(hwnd)) } else { title }
+}
+
+pub fn set_auto_detect(enabled: bool) {
+    AUTO_DETECT.store(enabled, Ordering::SeqCst);
+    if enabled { request_detection(); }
+}
+
+pub fn request_detection() {
+    if let Some(tx) = DETECT_TX.get() { let _ = tx.send(()); }
+}
+
+fn detect_windows(gm: &Arc<Mutex<GroupManager>>, desktop: &IVirtualDesktopManager) {
+    let mut handles = Vec::<isize>::new();
+    unsafe extern "system" fn collect(hwnd: HWND, lp: LPARAM) -> BOOL {
+        if IsWindowVisible(hwnd).as_bool() && IsWindowArranged(hwnd).as_bool() {
+            (*(lp.0 as *mut Vec<isize>)).push(hwnd.0 as isize);
+        }
+        TRUE
+    }
+    unsafe { let _ = EnumWindows(Some(collect), LPARAM(&mut handles as *mut _ as isize)); }
+    let mut by_desktop = HashMap::<String, Vec<(isize, String, String)>>::new();
+    for handle in handles {
+        let hwnd = HWND(handle as *mut _);
+        if let Ok(id) = unsafe { desktop.GetWindowDesktopId(hwnd) } {
+            by_desktop.entry(format!("{id:?}")).or_default().push((handle, String::new(), String::new()));
+        }
+    }
+    if let Ok(mut manager) = gm.lock() {
+        if replace_detected_groups(&mut manager, by_desktop) { notify_groups_changed(); }
+    }
+}
+
+fn replace_detected_groups(manager: &mut GroupManager, by_desktop: HashMap<String, Vec<(isize, String, String)>>) -> bool {
+        let incoming: HashMap<_, _> = by_desktop.iter().filter(|(_, windows)| windows.len() >= 2)
+            .map(|(desktop, windows)| (desktop.clone(), windows.iter().map(|window| window.0).collect::<std::collections::HashSet<_>>())).collect();
+        let existing: HashMap<_, _> = manager.groups.iter().map(|group| (group.name.clone(), manager.active_bindings.iter()
+            .filter_map(|(&hwnd, id)| (id == &group.id).then_some(hwnd)).collect::<std::collections::HashSet<_>>())).collect();
+        if incoming == existing { return false; }
+        manager.groups.clear();
+        manager.active_bindings.clear();
+        for (id, windows) in by_desktop {
+            if windows.len() >= 2 {
+                manager.create_group_from_hwnds(&id, windows, crate::group::MovementMode::Off, false);
+            }
+        }
+        true
+}
+
+#[cfg(test)]
+mod detection_tests {
+    use super::*;
+    #[test]
+    fn windows_are_grouped_only_within_each_desktop() {
+        let window = |h| (h, String::new(), String::new());
+        let mut manager = GroupManager::new();
+        replace_detected_groups(&mut manager, HashMap::from([
+            ("a".into(), vec![window(1), window(2)]),
+            ("b".into(), vec![window(3), window(4)]),
+            ("c".into(), vec![window(5)]),
+        ]));
+        assert_eq!(manager.get_sibling_hwnds(1), vec![2]);
+        assert_eq!(manager.get_sibling_hwnds(3), vec![4]);
+        assert!(manager.get_sibling_hwnds(5).is_empty());
+        replace_detected_groups(&mut manager, HashMap::new());
+        assert!(manager.active_bindings.is_empty());
+    }
+}
 
 static GROUP_MANAGER: OnceLock<Arc<Mutex<GroupManager>>> = OnceLock::new();
 static SUPPRESSED: AtomicBool = AtomicBool::new(false);
@@ -19,109 +109,9 @@ static LAST_FG_SYNC_MS: AtomicIsize = AtomicIsize::new(0);
 static START_INSTANT: OnceLock<Instant> = OnceLock::new();
 static MOVE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static MOVE_CACHE_DIRTY: AtomicBool = AtomicBool::new(false);
-static ALT_MOVE_ACTIVE: AtomicBool = AtomicBool::new(false);
-static ALT_MOVE: Mutex<Option<AltMove>> = Mutex::new(None);
-static MOVE_SERIAL: Mutex<()> = Mutex::new(());
-
-struct AltMove {
-    target: isize,
-    origin: (i32, i32),
-    siblings: Vec<(isize, i32, i32)>,
-    failed: bool,
-}
-
-fn alt_sibling_position(origin: (i32, i32), target: (i32, i32), sibling: (i32, i32)) -> (i32, i32) {
-    (sibling.0 + target.0 - origin.0, sibling.1 + target.1 - origin.1)
-}
-
-#[cfg(test)]
-mod alt_move_tests {
-    use super::alt_sibling_position;
-
-    #[test]
-    fn sibling_follows_actual_target_displacement() {
-        assert_eq!(alt_sibling_position((-100, 30), (25, -20), (50, 60)), (175, 10));
-        assert_eq!(alt_sibling_position((-100, 30), (-100, 30), (50, 60)), (50, 60));
-    }
-}
-
-pub fn alt_move_begin(target: isize) {
-
-    let Ok(_guard) = MOVE_SERIAL.lock() else { return; };
-    ALT_MOVE_ACTIVE.store(true, Ordering::SeqCst);
-    MOVE_CACHE_DIRTY.store(true, Ordering::SeqCst);
-    let session = (|| {
-        let gm = GROUP_MANAGER.get()?.lock().ok()?;
-
-        let group = gm.find_group_for_hwnd(target)?;
-
-        if !gm.movement_enabled(group) { return None; }
-        let siblings = gm.get_sibling_hwnds(target);
-        drop(gm);
-        let origin = get_window_pos(HWND(target as *mut _))?;
-        let siblings = siblings.into_iter().filter_map(|h| {
-            let hwnd = HWND(h as *mut _);
-            if unsafe { !IsWindow(hwnd).as_bool() || IsIconic(hwnd).as_bool() } { return None; }
-            get_window_pos(hwnd).map(|(x, y)| (h, x, y))
-        }).collect();
-
-        Some(AltMove { target, origin, siblings, failed: false })
-    })();
-
-    if let Ok(mut state) = ALT_MOVE.lock() { *state = session; }
-}
-
-pub fn alt_move_update(target: isize) {
-    let Ok(mut state) = ALT_MOVE.lock() else { return; };
-    let Some(session) = state.as_mut().filter(|s| s.target == target) else { return; };
-    let Some(gm) = GROUP_MANAGER.get() else { return; };
-    let Ok(gm) = gm.lock() else { return; };
-    let Some(group) = gm.find_group_for_hwnd(target) else { return; };
-    if !gm.movement_enabled(group) { return; }
-    let current_siblings = gm.get_sibling_hwnds(target);
-    drop(gm);
-    let Some((x, y)) = get_window_pos(HWND(target as *mut _)) else { return; };
-
-    MOVE_IN_PROGRESS.store(true, Ordering::SeqCst);
-    unsafe {
-        for &(handle, sx, sy) in &session.siblings {
-            if !current_siblings.contains(&handle) { continue; }
-            let hwnd = HWND(handle as *mut _);
-            if !IsWindow(hwnd).as_bool() || IsIconic(hwnd).as_bool() { continue; }
-            let mut rect = RECT::default();
-            if GetWindowRect(hwnd, &mut rect).is_err() { continue; }
-            let (tx, ty) = alt_sibling_position(session.origin, (x, y), (sx, sy));
-            let (tx, ty) = reachable_position(hwnd, tx, ty, rect.right - rect.left);
-            if (rect.left, rect.top) == (tx, ty) { continue; }
-            let result = SetWindowPos(hwnd, None, tx, ty, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            if let Err(error) = result {
-                log::warn!("Alt group move failed for {handle}: {error}");
-                session.failed = true;
-            }
-        }
-    }
-    MOVE_IN_PROGRESS.store(false, Ordering::SeqCst);
-}
-
-pub fn alt_move_end(target: isize) {
-
-    alt_move_update(target);
-    let failed = ALT_MOVE.lock().ok().and_then(|mut state| state.take()).is_some_and(|session| session.failed);
-    MOVE_CACHE_DIRTY.store(true, Ordering::SeqCst);
-    ALT_MOVE_ACTIVE.store(false, Ordering::SeqCst);
-    if failed {
-        std::thread::spawn(|| unsafe {
-            let message = if crate::i18n::get_lang() == crate::i18n::Lang::Zh {
-                "部分绑定窗口无法移动，请检查窗口权限或状态。"
-            } else {
-                "Some grouped windows could not be moved. Check their permissions or state."
-            };
-            let wide: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
-            let _ = MessageBoxW(None, windows::core::PCWSTR(wide.as_ptr()),
-                windows::core::w!("AlwaysBindWindow"), MB_OK | MB_ICONWARNING);
-        });
-    }
-}
+pub fn alt_move_begin(_: isize) {}
+pub fn alt_move_update(_: isize) {}
+pub fn alt_move_end(_: isize) {}
 
 const FG_DEBOUNCE_MS: isize = 150;
 
@@ -178,17 +168,6 @@ fn is_real_window(hwnd: HWND) -> bool {
         true
     }
 }
-fn get_window_pos(hwnd: HWND) -> Option<(i32, i32)> {
-    unsafe {
-        let mut r = RECT::default();
-        if GetWindowRect(hwnd, &mut r).is_ok() { Some((r.left, r.top)) } else { None }
-    }
-}
-/// Returns true if coordinates look valid (not minimized at -32000)
-fn is_valid_pos(x: i32, y: i32) -> bool {
-    x > -10000 && y > -10000
-}
-
 /// Keep a useful portion of the title bar inside a monitor's work area.
 /// Negative monitor coordinates are valid; use monitor bounds, not screen zero.
 fn reachable_position(hwnd: HWND, x: i32, y: i32, width: i32) -> (i32, i32) {
@@ -255,15 +234,14 @@ fn bring_group_to_front(activated_hwnd: isize, all_group_hwnds: &[isize]) {
         SUPPRESSED.store(true, Ordering::SeqCst);
 
         let mut zorder = get_zorder_sorted(all_group_hwnds);
+        zorder.retain(|&h| !IsIconic(HWND(h as *mut _)).as_bool());
         zorder.retain(|&h| h != activated_hwnd);
         zorder.insert(0, activated_hwnd);
 
         for &h in &zorder {
             let wh = HWND(h as *mut _);
             if !IsWindow(wh).as_bool() { continue; }
-            if IsIconic(wh).as_bool() {
-                let _ = ShowWindow(wh, SW_RESTORE);
-            }
+            if IsIconic(wh).as_bool() { continue; }
             let _ = ShowWindow(wh, SW_SHOWNA);
         }
 
@@ -288,42 +266,17 @@ fn bring_group_to_front(activated_hwnd: isize, all_group_hwnds: &[isize]) {
     }
 }
 
-pub fn minimize_windows(hwnds: &[isize]) {
-    unsafe {
-        SUPPRESSED.store(true, Ordering::SeqCst);
-        MOVE_CACHE_DIRTY.store(true, Ordering::SeqCst);
-        for &h in hwnds {
-            let wh = HWND(h as *mut _);
-            if IsWindow(wh).as_bool() && !IsIconic(wh).as_bool() {
-                let _ = ShowWindow(wh, SW_MINIMIZE);
-            }
-        }
-        SUPPRESSED.store(false, Ordering::SeqCst);
-        LAST_FG_SYNC_MS.store(elapsed_ms(), Ordering::SeqCst);
-    }
-}
-
-pub fn restore_windows(hwnds: &[isize]) {
-    unsafe {
-        SUPPRESSED.store(true, Ordering::SeqCst);
-        MOVE_CACHE_DIRTY.store(true, Ordering::SeqCst);
-        for &h in hwnds {
-            let wh = HWND(h as *mut _);
-            if IsWindow(wh).as_bool() && IsIconic(wh).as_bool() {
-                let _ = ShowWindow(wh, SW_RESTORE);
-            }
-        }
-        SUPPRESSED.store(false, Ordering::SeqCst);
-        LAST_FG_SYNC_MS.store(elapsed_ms(), Ordering::SeqCst);
-    }
-}
-
 unsafe extern "system" fn win_event_callback(
     _hook: HWINEVENTHOOK, event: u32, hwnd: HWND,
     id_object: i32, _id_child: i32, _thread_id: u32, _timestamp: u32,
 ) {
     if id_object != 0 || hwnd.0.is_null() { return; }
     if SUPPRESSED.load(Ordering::SeqCst) || MOVE_IN_PROGRESS.load(Ordering::SeqCst) { return; }
+
+    if AUTO_DETECT.load(Ordering::SeqCst) && matches!(event, 0x0003 | 0x000B | 0x0016 | 0x0017 | 0x8001 | 0x800B) {
+        request_detection();
+    }
+
 
     let hv = hwnd.0 as isize;
     let Some(gm_arc) = GROUP_MANAGER.get() else { return; };
@@ -336,35 +289,21 @@ unsafe extern "system" fn win_event_callback(
             // Groups hold only the exact windows the user lassoed; no auto-binding by process
             // name, so other windows of the same app stay independent.
             let sibs = gm.get_sibling_hwnds(hv);
+
             if sibs.is_empty() { return; }
-            let mut all = sibs; all.push(hv);
+            let Ok(desktop) = CoCreateInstance::<_, IVirtualDesktopManager>(&VirtualDesktopManager, None, CLSCTX_ALL) else { return; };
+            let Ok(active_desktop) = desktop.GetWindowDesktopId(hwnd) else { return; };
+            if !desktop.IsWindowOnCurrentVirtualDesktop(hwnd).map(|v| v.as_bool()).unwrap_or(false) { return; }
+            let mut all: Vec<_> = sibs.into_iter().filter(|&h| {
+                let other = HWND(h as *mut _);
+                desktop.GetWindowDesktopId(other).ok() == Some(active_desktop)
+                    && desktop.IsWindowOnCurrentVirtualDesktop(other).map(|v| v.as_bool()).unwrap_or(false)
+            }).collect();
+            if all.is_empty() { return; }
+            all.push(hv);
             info!("FG sync: {} windows", all.len());
             drop(gm);
             bring_group_to_front(hv, &all);
-        }
-        0x0016 => {
-            let now = elapsed_ms();
-            if now - LAST_FG_SYNC_MS.load(Ordering::SeqCst) < FG_DEBOUNCE_MS { return; }
-            let gm = match gm_arc.try_lock() { Ok(g) => g, Err(_) => return };
-            let gid = match gm.find_group_for_hwnd(hv) { Some(g) => g.to_string(), None => return };
-            if !gm.groups.iter().any(|g| g.id == gid && g.sync_minimize) { return; }
-            let sibs = gm.get_sibling_hwnds(hv);
-            if sibs.is_empty() { return; }
-            info!("Min sync: {}", sibs.len());
-            drop(gm);
-            minimize_windows(&sibs);
-        }
-        0x0017 => {
-            let now = elapsed_ms();
-            if now - LAST_FG_SYNC_MS.load(Ordering::SeqCst) < FG_DEBOUNCE_MS { return; }
-            let gm = match gm_arc.try_lock() { Ok(g) => g, Err(_) => return };
-            let gid = match gm.find_group_for_hwnd(hv) { Some(g) => g.to_string(), None => return };
-            if !gm.groups.iter().any(|g| g.id == gid && g.sync_minimize) { return; }
-            let sibs = gm.get_sibling_hwnds(hv);
-            if sibs.is_empty() { return; }
-            info!("Restore sync: {}", sibs.len());
-            drop(gm);
-            restore_windows(&sibs);
         }
         0x8001 => {
             if let Ok(mut gm) = gm_arc.try_lock() { gm.unbind_window(hv); }
@@ -373,186 +312,37 @@ unsafe extern "system" fn win_event_callback(
     }
 }
 
-/// Move sync: while VK_LBUTTON is held on a grouped fg window, follows the fg window's
-/// own movement (not the cursor), so dragging inside a window (e.g. panning a chart)
-/// or resizing it does not move its siblings.
-/// Repositions siblings as: target = sibling_pos_at_drag_start + fg_moved
-fn move_sync_loop(gm: Arc<Mutex<GroupManager>>) {
-    let mut tracked_fg: isize = 0;
-    // Sibling offsets relative to fg: sibling_pos = fg_pos + offset
-    let mut offsets: HashMap<isize, (i32, i32)> = HashMap::new();
-    // State for current drag
-    let mut drag_active: bool = false;
-    // fg window rect at the previous poll of the current drag
-    let mut drag_last_fg: RECT = RECT::default();
-    // Total distance the fg window has moved (without resizing) during the current drag
-    let mut drag_moved: (i32, i32) = (0, 0);
-    // Sibling absolute positions at drag start
-    let mut drag_sibling_start: HashMap<isize, (i32, i32)> = HashMap::new();
-
-    #[allow(dead_code)]
-    const MAX_DELTA: i32 = 300;
-
-    fn get_window_rect(hwnd: HWND) -> Option<RECT> {
-        unsafe { let mut r = RECT::default(); GetWindowRect(hwnd, &mut r).ok().map(|_| r) }
-    }
-    fn lbutton_down() -> bool {
-        unsafe { (GetAsyncKeyState(0x01 /* VK_LBUTTON */) as u16 & 0x8000) != 0 }
-    }
-
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(8));
-
-        let Ok(_guard) = MOVE_SERIAL.lock() else { continue; };
-        if ALT_MOVE_ACTIVE.load(Ordering::SeqCst) { continue; }
-
-        if MOVE_CACHE_DIRTY.swap(false, Ordering::SeqCst) {
-            tracked_fg = 0; offsets.clear(); drag_active = false; drag_sibling_start.clear();
-            drop(_guard);
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            continue;
-        }
-        if SUPPRESSED.load(Ordering::SeqCst) { continue; }
-
-        let fg = unsafe { GetForegroundWindow() };
-        if fg.0.is_null() { continue; }
-        let fg_h = fg.0 as isize;
-        if unsafe { IsIconic(fg).as_bool() } {
-            if fg_h == tracked_fg { tracked_fg = 0; offsets.clear(); drag_active = false; }
-            continue;
-        }
-
-        let gm_lock = match gm.try_lock() { Ok(g) => g, Err(_) => continue };
-        let gid = match gm_lock.find_group_for_hwnd(fg_h) {
-            Some(g) => g.to_string(),
-            None => {
-                if tracked_fg != 0 { tracked_fg = 0; offsets.clear(); drag_active = false; }
-                continue;
-            }
-        };
-        if !gm_lock.movement_enabled(&gid) {
-            // Independent movement invalidates every cached drag position.
-            tracked_fg = 0;
-            offsets.clear();
-            drag_active = false;
-            drag_sibling_start.clear();
-            continue;
-        }
-        let siblings = gm_lock.get_sibling_hwnds(fg_h);
-        if siblings.is_empty() { continue; }
-        drop(gm_lock);
-
-        // New fg — capture offsets
-        if fg_h != tracked_fg {
-            tracked_fg = fg_h;
-            offsets.clear();
-            drag_active = false;
-            drag_sibling_start.clear();
-            if let Some((fx, fy)) = get_window_pos(fg) {
-                if is_valid_pos(fx, fy) {
-                    for &sh in &siblings {
-                        let swh = HWND(sh as *mut _);
-                        if unsafe { !IsWindow(swh).as_bool() || IsIconic(swh).as_bool() } { continue; }
-                        if let Some((sx, sy)) = get_window_pos(swh) {
-                            if is_valid_pos(sx, sy) { offsets.insert(sh, (sx - fx, sy - fy)); }
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-
-        let lb = lbutton_down();
-
-        // Drag just started: left button pressed, have offsets
-        if lb && !drag_active && !offsets.is_empty() {
-            let Some(r) = get_window_rect(fg) else { continue; };
-            drag_active = true;
-            drag_last_fg = r;
-            drag_moved = (0, 0);
-            // Snapshot sibling positions at drag start
-            drag_sibling_start.clear();
-            for &sh in &siblings {
-                let swh = HWND(sh as *mut _);
-                if unsafe { !IsWindow(swh).as_bool() || IsIconic(swh).as_bool() } { continue; }
-                if let Some((sx, sy)) = get_window_pos(swh) {
-                    if is_valid_pos(sx, sy) { drag_sibling_start.insert(sh, (sx, sy)); }
-                }
-            }
-            continue;
-        }
-
-        // Drag ended: left button released
-        if !lb && drag_active {
-            drag_active = false;
-            drag_sibling_start.clear();
-            // Re-capture offsets at new positions
-            if let Some((fx, fy)) = get_window_pos(fg) {
-                if is_valid_pos(fx, fy) {
-                    offsets.clear();
-                    for &sh in &siblings {
-                        let swh = HWND(sh as *mut _);
-                        if unsafe { !IsWindow(swh).as_bool() || IsIconic(swh).as_bool() } { continue; }
-                        if let Some((sx, sy)) = get_window_pos(swh) {
-                            if is_valid_pos(sx, sy) { offsets.insert(sh, (sx - fx, sy - fy)); }
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-
-        // During drag: move siblings only by how far the fg window itself moved
-        if drag_active {
-            let Some(r) = get_window_rect(fg) else { continue; };
-            let prev = drag_last_fg;
-            drag_last_fg = r;
-            // Only a pure move counts: a drag inside the window leaves it in place,
-            // and a resize from an edge changes its size.
-            let same_size = r.right - r.left == prev.right - prev.left
-                && r.bottom - r.top == prev.bottom - prev.top;
-            if !same_size || (r.left == prev.left && r.top == prev.top) { continue; }
-            drag_moved.0 += r.left - prev.left;
-            drag_moved.1 += r.top - prev.top;
-
-            MOVE_IN_PROGRESS.store(true, Ordering::SeqCst);
-            unsafe {
-                for &sh in &siblings {
-                    let swh = HWND(sh as *mut _);
-                    if !IsWindow(swh).as_bool() || IsIconic(swh).as_bool() { continue; }
-                    if let Some(&(start_x, start_y)) = drag_sibling_start.get(&sh) {
-                        let tx = start_x + drag_moved.0;
-                        let ty = start_y + drag_moved.1;
-                        let Some(rect) = get_window_rect(swh) else { continue; };
-                        let (tx, ty) = reachable_position(swh, tx, ty, rect.right - rect.left);
-                        let _ = SetWindowPos(swh, HWND(std::ptr::null_mut()),
-                            tx, ty, 0, 0,
-                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-                    }
-                }
-            }
-            MOVE_IN_PROGRESS.store(false, Ordering::SeqCst);
-        }
-    }
-}
-
 pub fn start_monitor(gm: Arc<Mutex<GroupManager>>) -> Result<(), Box<dyn std::error::Error>> {
     GROUP_MANAGER.set(gm.clone()).map_err(|_| "init")?;
     START_INSTANT.set(Instant::now()).map_err(|_| "init")?;
 
-    let gm_move = gm.clone();
-    std::thread::spawn(move || {
-        info!("Move sync thread started");
-        move_sync_loop(gm_move);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = DETECT_TX.set(tx);
+    std::thread::spawn(move || unsafe {
+        if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() { log::error!("COM initialization failed"); return; }
+        let desktop: windows::core::Result<IVirtualDesktopManager> = CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_ALL);
+        if let Ok(desktop) = desktop {
+            while rx.recv().is_ok() {
+                while rx.recv_timeout(std::time::Duration::from_millis(150)).is_ok() {}
+                detect_windows(&gm, &desktop);
+            }
+        } else { log::error!("Virtual desktop manager unavailable: {:?}", desktop.err()); }
+        CoUninitialize();
     });
+    if AUTO_DETECT.load(Ordering::SeqCst) { request_detection(); }
 
     info!("Starting event monitor...");
     unsafe {
+        CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
         SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
             None, Some(win_event_callback), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
         SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND,
             None, Some(win_event_callback), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
         SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY,
+            None, Some(win_event_callback), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        SetWinEventHook(EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZEEND,
+            None, Some(win_event_callback), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
             None, Some(win_event_callback), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
         info!("Hooks: fg + min/max + destroy | Move: poll thread");

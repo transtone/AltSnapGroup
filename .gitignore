@@ -12,7 +12,9 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 
-# WorkBuddy
+# Agent Config
 .workbuddy/
+.pi/
+
 *.log
 *.exe

@@ -17,6 +17,8 @@ impl HotkeyConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default = "default_auto_detect")]
+    pub auto_detect: bool,
     #[serde(default)]
     pub alt: Option<crate::snap_config::FileConfig>,
     pub lang: String,  // "en" or "zh" or "auto"
@@ -30,6 +32,8 @@ pub struct Settings {
     pub auto_start: bool,
 }
 
+fn default_auto_detect() -> bool { true }
+
 fn default_hotkey_sync_move() -> HotkeyConfig {
     HotkeyConfig::new("Ctrl+Alt", "M")
 }
@@ -37,6 +41,7 @@ fn default_hotkey_sync_move() -> HotkeyConfig {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            auto_detect: true,
             alt: None,
             lang: "auto".to_string(),
             hotkey_bind: HotkeyConfig::new("Ctrl+Alt", "G"),
