@@ -17,6 +17,8 @@ impl HotkeyConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub alt: Option<crate::snap_config::FileConfig>,
     pub lang: String,  // "en" or "zh" or "auto"
     pub hotkey_bind: HotkeyConfig,
     pub hotkey_unbind_cursor: HotkeyConfig,
@@ -35,6 +37,7 @@ fn default_hotkey_sync_move() -> HotkeyConfig {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            alt: None,
             lang: "auto".to_string(),
             hotkey_bind: HotkeyConfig::new("Ctrl+Alt", "G"),
             hotkey_unbind_cursor: HotkeyConfig::new("Ctrl+Alt", "D"),
@@ -47,7 +50,7 @@ impl Default for Settings {
     }
 }
 
-fn settings_path() -> PathBuf {
+pub fn settings_path() -> PathBuf {
     let dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("AlwaysBindWindow");
@@ -61,6 +64,8 @@ pub fn load() -> Settings {
         if let Ok(s) = serde_json::from_str::<Settings>(&content) {
             return s;
         }
+        log::error!("Invalid settings file; preserving existing file");
+        return Settings::default();
     }
     // Return default and save it
     let s = Settings::default();
@@ -68,10 +73,46 @@ pub fn load() -> Settings {
     s
 }
 
+pub fn load_alt() -> Result<crate::snap_config::FileConfig, Box<dyn std::error::Error>> {
+    load_alt_from(&settings_path())
+}
+
+fn load_alt_from(path: &std::path::Path) -> Result<crate::snap_config::FileConfig, Box<dyn std::error::Error>> {
+    let mut settings: Settings = serde_json::from_str(&fs::read_to_string(&path)?)?;
+    if let Some(alt) = settings.alt { return Ok(alt); }
+    let alt = crate::snap_config::FileConfig::default();
+    alt.to_runtime_config()?;
+    settings.alt = Some(alt.clone());
+    save_to(path, &settings)?;
+    Ok(alt)
+}
+
 pub fn save(settings: &Settings) -> Result<(), Box<dyn std::error::Error>> {
-    let path = settings_path();
-    let content = serde_json::to_string_pretty(settings)?;
-    fs::write(&path, content)?;
+    save_to(&settings_path(), settings)
+}
+
+fn save_to(path: &std::path::Path, settings: &Settings) -> Result<(), Box<dyn std::error::Error>> {
+    let mut updated = settings.clone();
+    if path.exists() {
+        let current: Settings = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        updated.alt = current.alt.or(updated.alt);
+    }
+    let content = serde_json::to_string_pretty(&updated)?;
+    let temporary = path.with_file_name(format!("settings-{}.tmp", uuid::Uuid::new_v4()));
+    fs::write(&temporary, content)?;
+    #[cfg(windows)]
+    let result = {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+        let from: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe { MoveFileExW(windows::core::PCWSTR(from.as_ptr()), windows::core::PCWSTR(to.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) }
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+    };
+    #[cfg(not(windows))]
+    let result = fs::rename(&temporary, &path).map_err(|e| Box::new(e) as Box<dyn std::error::Error>);
+    if result.is_err() { let _ = fs::remove_file(&temporary); }
+    result?;
     Ok(())
 }
 
@@ -236,6 +277,41 @@ pub fn is_auto_start_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initializes_defaults_and_preserves_existing_settings() {
+        let dir = std::env::temp_dir().join(format!("abw-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let mut original = Settings::default();
+        original.lang = "zh".into();
+        fs::write(&path, serde_json::to_string(&original).unwrap()).unwrap();
+        assert_eq!(load_alt_from(&path).unwrap().activation.modifier, "alt");
+        let mut edited: Settings = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        edited.alt.as_mut().unwrap().activation.modifier = "ctrl".into();
+        fs::write(&path, serde_json::to_string(&edited).unwrap()).unwrap();
+        assert_eq!(load_alt_from(&path).unwrap().activation.modifier, "ctrl");
+        original.lang = "en".into();
+        save_to(&path, &original).unwrap();
+        let updated: Settings = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(updated.lang, "en");
+        assert_eq!(updated.alt.unwrap().activation.modifier, "ctrl");
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn invalid_settings_are_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("abw-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let original = "invalid json";
+        fs::write(&path, original).unwrap();
+        assert!(load_alt_from(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(&dir).unwrap();
+    }
 
     #[test]
     fn old_settings_gain_movement_hotkey_without_losing_preferences() {

@@ -244,6 +244,17 @@ fn right_up_ends_resize_drag() {
 }
 
 #[test]
+fn resize_accepts_right_down_and_normal_right_click_passes_through() {
+    let mut e = Engine::new(EngineConfig::default());
+    let cursor = Point { x: 110, y: 110 };
+    assert!(!e.handle(Event::RightDown { cursor, target: Some(default_target()) })
+        .iter().any(|a| matches!(a, Action::SwallowEvent)));
+    e.handle(Event::KeyChange { vk: VirtualKey::Alt, down: true });
+    assert!(e.handle(Event::RightDown { cursor, target: Some(default_target()) })
+        .iter().any(|a| matches!(a, Action::SwallowEvent)));
+}
+
+#[test]
 fn toggle_enable_from_idle_goes_to_disabled() {
     let mut e = Engine::new(EngineConfig::default());
     e.handle(Event::ToggleEnable);

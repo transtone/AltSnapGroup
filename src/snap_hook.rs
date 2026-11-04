@@ -26,6 +26,7 @@ thread_local! {
     pub static ENGINE: RefCell<Engine> = RefCell::new(Engine::new(EngineConfig::default()));
     static MOUSE_HOOK: RefCell<Option<HHOOK>> = const { RefCell::new(None) };
     static KEY_HOOK:   RefCell<Option<HHOOK>> = const { RefCell::new(None) };
+    static RIGHT_LATCH: RefCell<crate::right_button_latch::RightButtonLatch> = RefCell::new(crate::right_button_latch::RightButtonLatch::default());
 }
 
 pub fn install() -> windows::core::Result<()> {
@@ -98,7 +99,16 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     };
 
     let swallow = if let Some(ev) = event {
-        let actions = ENGINE.with(|e| e.borrow_mut().handle(ev));
+        let actions = ENGINE.with(|e| {
+            let mut engine = e.borrow_mut();
+            let mut actions = Vec::new();
+            if wparam.0 as u32 == WM_RBUTTONUP
+                && matches!(engine.state(), crate::engine::state::State::Resizing { .. }) {
+                actions.extend(engine.handle(Event::MouseMove { cursor }));
+            }
+            actions.extend(engine.handle(ev));
+            actions
+        });
         let outcome = crate::snap_adapter::apply_actions(&actions);
         // Feed any re-entry events (e.g. DragAborted) back into the engine.
         for re_ev in outcome.re_entry {
@@ -110,6 +120,14 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         false
     };
 
+    let swallow = match wparam.0 as u32 {
+        WM_RBUTTONDOWN => {
+            RIGHT_LATCH.with(|latch| latch.borrow_mut().press(swallow));
+            swallow
+        }
+        WM_RBUTTONUP => RIGHT_LATCH.with(|latch| latch.borrow_mut().release()) || swallow,
+        _ => swallow,
+    };
     if swallow {
         LRESULT(1)
     } else {

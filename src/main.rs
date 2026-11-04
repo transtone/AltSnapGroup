@@ -1,12 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod group;
+#[cfg(any(windows, test))] mod right_button_latch;
+
 mod engine;
 mod snap_config;
 #[cfg(windows)] mod snap_hook;
 #[cfg(windows)] mod elevate;
 #[cfg(windows)] mod snap_fullscreen;
 #[cfg(windows)] mod snap_adapter;
+#[cfg(windows)] mod resize_worker;
 #[cfg(windows)] mod snap_tool_window;
 #[cfg(windows)] mod snap_overlay;
 #[cfg(windows)] mod monitors;
@@ -63,14 +66,7 @@ fn show_startup_error(message: &str) {
 }
 
 fn main() {
-    let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-    // GUI builds have no stderr console; opt-in file logging supports diagnosis.
-    if let Some(path) = std::env::var_os("ALWAYSBINDWINDOW_LOG") {
-        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            logger.target(env_logger::Target::Pipe(Box::new(file)));
-        }
-    }
-    logger.init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     #[cfg(windows)]
     if !elevate::wait_for_previous() {
@@ -108,8 +104,7 @@ fn main() {
     let (snap_ready_tx, snap_ready_rx) = std::sync::mpsc::sync_channel(1);
     #[cfg(windows)]
     let snap_thread = std::thread::spawn(move || {
-        let path = snap_config::default_config_path();
-        match snap_config::load_from_path(&path).and_then(|c| c.to_runtime_config()) {
+        match settings::load_alt().and_then(|c| Ok(c.to_runtime_config()?)) {
             Ok(config) => {
                 snap_hook::ENGINE.with(|e| { e.borrow_mut().set_config(config.engine); });
                 snap_overlay::set_opacity(config.adapter.preview_opacity);

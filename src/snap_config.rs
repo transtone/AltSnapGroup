@@ -1,7 +1,7 @@
 //! TOML config: load, save, convert to engine view.
 
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -195,46 +195,11 @@ pub enum ConfigError {
     Invalid(String),
 }
 
+#[cfg(test)]
 pub fn load_from_str(s: &str) -> Result<FileConfig, ConfigError> {
     Ok(toml::from_str(s)?)
 }
 
-pub fn load_from_path(path: &Path) -> Result<FileConfig, ConfigError> {
-    if !path.exists() {
-        let default = FileConfig::default();
-        save_to_path(path, &default)?;
-        return Ok(default);
-    }
-    let s = std::fs::read_to_string(path)?;
-    load_from_str(&s)
-}
-
-pub fn save_to_path(path: &Path, cfg: &FileConfig) -> Result<(), ConfigError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let s = toml::to_string_pretty(cfg)?;
-    std::fs::write(path, s)?;
-    Ok(())
-}
-
-/// Resolve the default config path: `%APPDATA%\Alt3rSnap\config.toml` on Windows,
-/// or `~/.config/alt3rsnap/config.toml` on other systems (used only for unit tests).
-pub fn default_config_path() -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Some(dirs) = directories::ProjectDirs::from("com", "Alt3rSnap", "Alt3rSnap") {
-            return dirs.config_dir().join("config.toml");
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        if let Some(dirs) = directories::ProjectDirs::from("com", "Alt3rSnap", "Alt3rSnap") {
-            return dirs.config_dir().join("config.toml");
-        }
-    }
-    PathBuf::from("config.toml")
-}
 
 use crate::engine::config::{EngineConfig, SnapEngineConfig, ZoneToggles};
 use crate::engine::modifiers::{ModMatcher, Modifiers};

@@ -1,10 +1,12 @@
 [package]
 name = "always-bind-window"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2021"
 description = "Bind multiple windows together - activate any one, all come to front"
 license = "MIT"
 repository = "https://github.com/XR-stb/AlwaysBindWindow"
+
+
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -12,7 +14,7 @@ serde_json = "1"
 toml = "0.8"
 regex = "1"
 thiserror = "1"
-directories = "4"
+
 tracing = "0.1"
 dirs = "5"
 log = "0.4"
@@ -34,6 +36,7 @@ windows = { version = "0.58", features = [
     "Win32_UI_Controls",
     "Win32_System_Threading",
     "Win32_System_Registry",
+    "Win32_Storage_FileSystem",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",

@@ -46,12 +46,15 @@ mod alt_move_tests {
 }
 
 pub fn alt_move_begin(target: isize) {
+
     let Ok(_guard) = MOVE_SERIAL.lock() else { return; };
     ALT_MOVE_ACTIVE.store(true, Ordering::SeqCst);
     MOVE_CACHE_DIRTY.store(true, Ordering::SeqCst);
     let session = (|| {
         let gm = GROUP_MANAGER.get()?.lock().ok()?;
+
         let group = gm.find_group_for_hwnd(target)?;
+
         if !gm.movement_enabled(group) { return None; }
         let siblings = gm.get_sibling_hwnds(target);
         drop(gm);
@@ -61,8 +64,10 @@ pub fn alt_move_begin(target: isize) {
             if unsafe { !IsWindow(hwnd).as_bool() || IsIconic(hwnd).as_bool() } { return None; }
             get_window_pos(hwnd).map(|(x, y)| (h, x, y))
         }).collect();
+
         Some(AltMove { target, origin, siblings, failed: false })
     })();
+
     if let Ok(mut state) = ALT_MOVE.lock() { *state = session; }
 }
 
@@ -76,6 +81,7 @@ pub fn alt_move_update(target: isize) {
     let current_siblings = gm.get_sibling_hwnds(target);
     drop(gm);
     let Some((x, y)) = get_window_pos(HWND(target as *mut _)) else { return; };
+
     MOVE_IN_PROGRESS.store(true, Ordering::SeqCst);
     unsafe {
         for &(handle, sx, sy) in &session.siblings {
@@ -86,7 +92,9 @@ pub fn alt_move_update(target: isize) {
             if GetWindowRect(hwnd, &mut rect).is_err() { continue; }
             let (tx, ty) = alt_sibling_position(session.origin, (x, y), (sx, sy));
             let (tx, ty) = reachable_position(hwnd, tx, ty, rect.right - rect.left);
-            if let Err(error) = SetWindowPos(hwnd, None, tx, ty, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) {
+            if (rect.left, rect.top) == (tx, ty) { continue; }
+            let result = SetWindowPos(hwnd, None, tx, ty, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            if let Err(error) = result {
                 log::warn!("Alt group move failed for {handle}: {error}");
                 session.failed = true;
             }
@@ -96,6 +104,7 @@ pub fn alt_move_update(target: isize) {
 }
 
 pub fn alt_move_end(target: isize) {
+
     alt_move_update(target);
     let failed = ALT_MOVE.lock().ok().and_then(|mut state| state.take()).is_some_and(|session| session.failed);
     MOVE_CACHE_DIRTY.store(true, Ordering::SeqCst);

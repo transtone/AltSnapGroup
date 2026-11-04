@@ -158,6 +158,72 @@ pub unsafe fn set_window_rect(hwnd: HWND, rect: GRect) -> bool {
     .is_ok()
 }
 
+
+
+pub unsafe fn resize_window_rect(hwnd: HWND, rect: GRect) -> bool {
+    use windows::Win32::Graphics::Gdi::{RedrawWindow, RDW_UPDATENOW, RDW_ALLCHILDREN};
+    if SetWindowPos(hwnd, HWND_TOP, rect.left, rect.top, rect.width(), rect.height(),
+        SWP_NOZORDER | SWP_NOACTIVATE).is_err() {
+        return false;
+    }
+    // Flush only existing invalid regions; invalidating the whole client stalls live resize.
+    if !RedrawWindow(hwnd, None, None, RDW_UPDATENOW | RDW_ALLCHILDREN).as_bool() {
+        log::warn!("Could not repaint the resized window");
+    }
+    true
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    static PAINTS: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        if msg == WM_WINDOWPOSCHANGING {
+            let pos = &mut *(lp.0 as *mut WINDOWPOS);
+            if !pos.flags.contains(SWP_NOSIZE) { pos.cx = pos.cx.max(100); }
+        }
+        if msg == WM_PAINT {
+            let mut ps = PAINTSTRUCT::default();
+            BeginPaint(hwnd, &mut ps);
+            let _ = EndPaint(hwnd, &ps);
+            PAINTS.fetch_add(1, SeqCst);
+            return LRESULT(0);
+        }
+        DefWindowProcW(hwnd, msg, wp, lp)
+    }
+    #[test]
+    fn resize_honors_target_layout_and_flushes_pending_paint() {
+        unsafe {
+            let name = windows::core::w!("AlwaysBindResizeTest");
+            let instance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();
+            let class = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: instance.into(),
+                lpszClassName: name, ..Default::default() };
+            assert_ne!(RegisterClassW(&class), 0);
+            let hwnd = CreateWindowExW(WS_EX_NOACTIVATE, name, name, WS_POPUP | WS_VISIBLE,
+                0, 0, 120, 80, None, None, instance, None).unwrap();
+            let child = CreateWindowExW(WS_EX_NOACTIVATE, name, name, WS_CHILD | WS_VISIBLE,
+                0, 0, 100, 30, hwnd, None, instance, None).unwrap();
+            assert!(resize_window_rect(hwnd, GRect { left: 0, top: 0, right: 90, bottom: 90 }));
+            let actual = hwnd_rect(hwnd).unwrap();
+            let painted = PAINTS.load(SeqCst);
+            assert!(resize_window_rect(hwnd, actual));
+            let idle = PAINTS.load(SeqCst);
+            assert!(resize_window_rect(hwnd, actual));
+            let after = PAINTS.load(SeqCst);
+            let _ = child;
+            DestroyWindow(hwnd).unwrap();
+            UnregisterClassW(name, instance).unwrap();
+            assert_eq!(actual.width(), 100, "target must receive WM_WINDOWPOSCHANGING");
+            assert!(painted >= 2, "parent and child must paint before resize returns");
+            assert_eq!(idle, after, "unchanged geometry must not invalidate the entire client");
+        }
+    }
+}
+
 pub unsafe fn is_zoomed(hwnd: HWND) -> bool {
     IsZoomed(hwnd).as_bool()
 }

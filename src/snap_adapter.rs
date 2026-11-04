@@ -13,6 +13,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static LAST_BALLOON_EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
 static DRAG_STATE: AtomicBool = AtomicBool::new(false);
+
+
+static RESIZING: AtomicBool = AtomicBool::new(false);
+
+
 static MOVE_HWND: AtomicU64 = AtomicU64::new(0);
 
 static SWALLOW_LATCH: std::sync::OnceLock<SwallowLatch> = std::sync::OnceLock::new();
@@ -40,6 +45,8 @@ fn maybe_balloon_uipi() {
 }
 
 pub unsafe fn resolve_target(cursor: Point) -> Option<DragTarget> {
+    // A finishing resize must settle before reading the next gesture's initial rectangle.
+    if crate::resize_worker::finishing() { return None; }
     let info = win_api::window_under_cursor(cursor)?;
     let hwnd_raw = win_api::window_under_cursor_hwnd(cursor)?;
 
@@ -89,8 +96,16 @@ pub fn apply_actions(actions: &[Action]) -> AdapterOutcome {
     };
     for a in actions {
         match a {
-            Action::BeginDrag { hwnd, mode, .. } => unsafe {
+            Action::BeginDrag { hwnd, mode, initial_rect, .. } => unsafe {
+                let resizing = matches!(mode, DragMode::Resize { .. });
+                if resizing && !crate::resize_worker::begin(*hwnd, *initial_rect) {
+                    outcome.re_entry.push(Event::DragAborted { reason: DragAbortReason::ApplyGeometryFailed });
+                    break;
+                }
+                RESIZING.store(resizing, Ordering::Relaxed);
+
                 DRAG_STATE.store(true, Ordering::Relaxed);
+
                 if *mode == DragMode::Move {
                     MOVE_HWND.store(hwnd.0, Ordering::Relaxed);
                     crate::platform::windows::alt_move_begin(hwnd.0 as isize);
@@ -98,7 +113,12 @@ pub fn apply_actions(actions: &[Action]) -> AdapterOutcome {
                 win_api::capture_mouse(crate::snap_tool_window::hwnd());
             },
             Action::UpdateDrag { hwnd, new_rect } => unsafe {
-                let ok = win_api::set_window_rect(win_api::id_to_hwnd(*hwnd), *new_rect);
+                let ok = if RESIZING.load(Ordering::Relaxed) {
+                    crate::resize_worker::update(*new_rect)
+                } else {
+                    win_api::set_window_rect(win_api::id_to_hwnd(*hwnd), *new_rect)
+                };
+
                 if ok && MOVE_HWND.load(Ordering::Relaxed) == hwnd.0 {
                     crate::platform::windows::alt_move_update(hwnd.0 as isize);
                 }
@@ -107,14 +127,17 @@ pub fn apply_actions(actions: &[Action]) -> AdapterOutcome {
                     outcome.re_entry.push(Event::DragAborted {
                         reason: DragAbortReason::ApplyGeometryFailed,
                     });
-                    break;
+                    // Release/capture cleanup may follow this update in the same batch.
+                    continue;
                 }
             },
             Action::EndDrag { hwnd } => unsafe {
+                if RESIZING.swap(false, Ordering::Relaxed) { crate::resize_worker::end(); }
                 if MOVE_HWND.swap(0, Ordering::Relaxed) == hwnd.0 {
                     crate::platform::windows::alt_move_end(hwnd.0 as isize);
                 }
                 DRAG_STATE.store(false, Ordering::Relaxed);
+
                 crate::monitors::on_drag_ended();
                 win_api::release_mouse();
             },

@@ -104,8 +104,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         RELOAD => {
-            match crate::snap_config::load_from_path(&crate::snap_config::default_config_path())
-                .and_then(|config| config.to_runtime_config()) {
+            match crate::settings::load_alt()
+                .and_then(|config| Ok(config.to_runtime_config()?)) {
                 Ok(config) => {
                     crate::snap_hook::ENGINE.with(|engine| {
                         let actions = engine.borrow_mut().set_config(config.engine);

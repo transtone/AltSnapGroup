@@ -150,6 +150,8 @@ fn bind_picked_windows(gm: &Arc<Mutex<GroupManager>>, settings: &Settings, resul
         .iter().map(|w| (w.hwnd, w.process_name.clone(), w.title.clone())).collect();
     let count = selected.len();
 
+
+
     let mut mgr = gm.lock().unwrap();
     mgr.create_group_from_hwnds(&name, selected, result.movement, settings.sync_minimize);
     info!("Bound {} windows: {}", count, name);
@@ -253,13 +255,7 @@ impl ApplicationHandler for App {
                     }
                 },
                 #[cfg(windows)] ID_SNAP_CONFIG => {
-                    let path = crate::snap_config::default_config_path();
-                    if !path.exists() {
-                        if let Err(error) = crate::snap_config::save_to_path(&path, &crate::snap_config::FileConfig::default()) {
-                            error!("Could not create Alt configuration: {}", error);
-                            continue;
-                        }
-                    }
+                    let path = crate::settings::settings_path();
                     let wide: Vec<u16> = path.to_string_lossy().encode_utf16().chain(Some(0)).collect();
                     unsafe {
                         windows::Win32::UI::Shell::ShellExecuteW(None, windows::core::w!("open"),
