@@ -72,6 +72,7 @@ pub struct ModMatcher {
 }
 
 impl ModMatcher {
+    #[allow(dead_code)]
     pub const NEVER: ModMatcher = ModMatcher {
         required: Modifiers::NONE,
         forbidden: Modifiers::NONE,

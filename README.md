@@ -108,9 +108,8 @@ cargo build --release
 
 ### Alt 窗口操作（Windows）
 
-按住 Alt 并用左键拖动可移动窗口，右键拖动可调整大小。绑定组启用同步移动时，Alt 移动也会带动组内窗口。托盘菜单可切换此功能、编辑并重新加载配置；配置兼容 `%APPDATA%/Alt3rSnap/config.toml`。操作管理员权限窗口时需要以管理员身份启动本程序。
+按住 Alt 并用左键拖动可移动窗口，右键拖动可调整大小。绑定组启用同步移动时，Alt 移动也会带动组内窗口。托盘菜单可切换此功能、编辑并重新加载配置；配置兼容 `%APPDATA%/Alt3rSnap/config.toml`。操作管理员权限窗口时，可通过托盘菜单以管理员身份重新启动；重启后本次会话的窗口分组不会保留。
 
-Alt 窗口操作代码基于 [Alt3rSnap](https://github.com/avymiatnin/alt3rsnap)；其项目声明使用 MIT 或 Apache-2.0 许可证。发布前需核对上游完整许可文本及署名要求。
 
 ### 这是什么？
 
@@ -187,3 +186,5 @@ cargo build --release
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.
+
+本项目整合了 [Alt3rSnap](https://github.com/alvytsk/alt3rsnap) 的窗口操作功能，使用其双许可中的 MIT 许可。

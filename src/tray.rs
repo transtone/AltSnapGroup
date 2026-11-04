@@ -33,6 +33,7 @@ const ID_QUIT: &str = "quit";
 #[cfg(windows)] const ID_SNAP_TOGGLE: &str = "snap_toggle";
 #[cfg(windows)] const ID_SNAP_RELOAD: &str = "snap_reload";
 #[cfg(windows)] const ID_SNAP_CONFIG: &str = "snap_config";
+#[cfg(windows)] const ID_RESTART_ELEVATED: &str = "restart_elevated";
 
 fn create_icon() -> tray_icon::Icon {
     let size = 16u32;
@@ -107,6 +108,7 @@ fn build_menu(settings: &Settings, gm: &GroupManager, registered: [bool; 4]) -> 
         let _ = menu.append(&MenuItem::with_id(ID_SNAP_TOGGLE, if zh { "切换 Alt 窗口操作" } else { "Toggle Alt window controls" }, true, None));
         let _ = menu.append(&MenuItem::with_id(ID_SNAP_RELOAD, if zh { "重新加载 Alt 配置" } else { "Reload Alt configuration" }, true, None));
         let _ = menu.append(&MenuItem::with_id(ID_SNAP_CONFIG, if zh { "编辑 Alt 配置" } else { "Edit Alt configuration" }, true, None));
+        let _ = menu.append(&MenuItem::with_id(ID_RESTART_ELEVATED, if zh { "以管理员身份重新启动" } else { "Restart as administrator" }, true, None));
     }
     let autostart_label = if i18n::get_lang() == i18n::Lang::Zh { "开机自启" } else { "Auto Start" };
     let autostart_check = CheckMenuItem::with_id(ID_TOGGLE_AUTOSTART,
@@ -238,6 +240,18 @@ impl ApplicationHandler for App {
             match ev.id().0.as_str() {
                 #[cfg(windows)] ID_SNAP_TOGGLE => crate::snap_tool_window::send(crate::snap_tool_window::TOGGLE),
                 #[cfg(windows)] ID_SNAP_RELOAD => crate::snap_tool_window::send(crate::snap_tool_window::RELOAD),
+                #[cfg(windows)] ID_RESTART_ELEVATED => {
+                    let zh = i18n::get_lang() == i18n::Lang::Zh;
+                    let prompt = if zh { "重启后当前窗口分组将丢失。是否继续？" } else { "Current window groups will be lost on restart. Continue?" };
+                    let wide: Vec<u16> = prompt.encode_utf16().chain(Some(0)).collect();
+                    let confirmed = unsafe { MessageBoxW(None, windows::core::PCWSTR(wide.as_ptr()),
+                        windows::core::w!("AlwaysBindWindow"), MB_YESNO | MB_ICONWARNING) == IDYES };
+                    if !confirmed { continue; }
+                    match crate::elevate::restart_elevated() {
+                        Ok(()) => { event_loop.exit(); return; }
+                        Err(error) => error!("Administrator restart cancelled or failed: {}", error),
+                    }
+                },
                 #[cfg(windows)] ID_SNAP_CONFIG => {
                     let path = crate::snap_config::default_config_path();
                     if !path.exists() {

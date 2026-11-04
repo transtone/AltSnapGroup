@@ -95,6 +95,7 @@ pub struct WindowInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleAction {
     Exclude,
+    #[allow(dead_code)]
     IncludeOnly,
     // Override(PerWindowConfig) — v0.2+
 }

@@ -27,6 +27,7 @@ struct AltMove {
     target: isize,
     origin: (i32, i32),
     siblings: Vec<(isize, i32, i32)>,
+    failed: bool,
 }
 
 fn alt_sibling_position(origin: (i32, i32), target: (i32, i32), sibling: (i32, i32)) -> (i32, i32) {
@@ -60,14 +61,14 @@ pub fn alt_move_begin(target: isize) {
             if unsafe { !IsWindow(hwnd).as_bool() || IsIconic(hwnd).as_bool() } { return None; }
             get_window_pos(hwnd).map(|(x, y)| (h, x, y))
         }).collect();
-        Some(AltMove { target, origin, siblings })
+        Some(AltMove { target, origin, siblings, failed: false })
     })();
     if let Ok(mut state) = ALT_MOVE.lock() { *state = session; }
 }
 
 pub fn alt_move_update(target: isize) {
-    let Ok(state) = ALT_MOVE.lock() else { return; };
-    let Some(session) = state.as_ref().filter(|s| s.target == target) else { return; };
+    let Ok(mut state) = ALT_MOVE.lock() else { return; };
+    let Some(session) = state.as_mut().filter(|s| s.target == target) else { return; };
     let Some(gm) = GROUP_MANAGER.get() else { return; };
     let Ok(gm) = gm.lock() else { return; };
     let Some(group) = gm.find_group_for_hwnd(target) else { return; };
@@ -87,6 +88,7 @@ pub fn alt_move_update(target: isize) {
             let (tx, ty) = reachable_position(hwnd, tx, ty, rect.right - rect.left);
             if let Err(error) = SetWindowPos(hwnd, None, tx, ty, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) {
                 log::warn!("Alt group move failed for {handle}: {error}");
+                session.failed = true;
             }
         }
     }
@@ -95,9 +97,21 @@ pub fn alt_move_update(target: isize) {
 
 pub fn alt_move_end(target: isize) {
     alt_move_update(target);
-    if let Ok(mut state) = ALT_MOVE.lock() { *state = None; }
+    let failed = ALT_MOVE.lock().ok().and_then(|mut state| state.take()).is_some_and(|session| session.failed);
     MOVE_CACHE_DIRTY.store(true, Ordering::SeqCst);
     ALT_MOVE_ACTIVE.store(false, Ordering::SeqCst);
+    if failed {
+        std::thread::spawn(|| unsafe {
+            let message = if crate::i18n::get_lang() == crate::i18n::Lang::Zh {
+                "部分绑定窗口无法移动，请检查窗口权限或状态。"
+            } else {
+                "Some grouped windows could not be moved. Check their permissions or state."
+            };
+            let wide: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+            let _ = MessageBoxW(None, windows::core::PCWSTR(wide.as_ptr()),
+                windows::core::w!("AlwaysBindWindow"), MB_OK | MB_ICONWARNING);
+        });
+    }
 }
 
 const FG_DEBOUNCE_MS: isize = 150;
@@ -367,6 +381,7 @@ fn move_sync_loop(gm: Arc<Mutex<GroupManager>>) {
     // Sibling absolute positions at drag start
     let mut drag_sibling_start: HashMap<isize, (i32, i32)> = HashMap::new();
 
+    #[allow(dead_code)]
     const MAX_DELTA: i32 = 300;
 
     fn get_window_rect(hwnd: HWND) -> Option<RECT> {

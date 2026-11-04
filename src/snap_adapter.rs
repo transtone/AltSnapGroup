@@ -179,6 +179,7 @@ fn now_ms() -> u64 {
 /// Concrete `WinApi` implementation that calls the real Win32 wrappers and the
 /// overlay.  Lives here (binary crate) rather than in `win_api_trait` because
 /// `win_api` and `overlay` are declared in `main.rs`'s module tree.
+#[allow(dead_code)]
 pub struct Win32WinApi {
     pub hinstance: windows::Win32::Foundation::HINSTANCE,
 }

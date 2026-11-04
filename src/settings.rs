@@ -211,6 +211,7 @@ fn set_auto_start_macos(enable: bool) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 /// Check if auto-start is currently enabled
+#[allow(dead_code)]
 pub fn is_auto_start_enabled() -> bool {
     #[cfg(target_os = "windows")]
     {

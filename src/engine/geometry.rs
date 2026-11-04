@@ -7,6 +7,7 @@ pub struct Point {
 }
 
 impl Point {
+    #[allow(dead_code)]
     pub const ZERO: Point = Point { x: 0, y: 0 };
 
     pub fn delta(self, other: Point) -> Point {
@@ -42,10 +43,12 @@ impl Rect {
         }
     }
 
+    #[allow(dead_code)]
     pub fn contains(self, p: Point) -> bool {
         p.x >= self.left && p.x < self.right && p.y >= self.top && p.y < self.bottom
     }
 
+    #[allow(dead_code)]
     pub fn center(self) -> Point {
         Point {
             x: (self.left + self.right) / 2,

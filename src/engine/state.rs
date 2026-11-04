@@ -61,6 +61,7 @@ pub struct DragTarget {
 /// failure to continue/apply drag geometry — never for user cancellation, snap
 /// disengagement, or a normal drag end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum DragAbortReason {
     TargetInvalid,
     CaptureLost,
@@ -68,6 +69,7 @@ pub enum DragAbortReason {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Event {
     KeyChange {
         vk: VirtualKey,

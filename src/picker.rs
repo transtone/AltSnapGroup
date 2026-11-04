@@ -42,6 +42,7 @@ pub fn get_pickable_windows() -> Vec<TrackedWindow> {
 }
 
 /// Print windows to console (for debugging / CLI mode)
+#[allow(dead_code)]
 pub fn print_windows(windows: &[TrackedWindow]) {
     info!("Available windows:");
     for (i, w) in windows.iter().enumerate() {

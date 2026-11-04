@@ -4,13 +4,14 @@ mod group;
 mod engine;
 mod snap_config;
 #[cfg(windows)] mod snap_hook;
+#[cfg(windows)] mod elevate;
 #[cfg(windows)] mod snap_fullscreen;
 #[cfg(windows)] mod snap_adapter;
 #[cfg(windows)] mod snap_tool_window;
 #[cfg(windows)] mod snap_overlay;
 #[cfg(windows)] mod monitors;
 #[cfg(windows)] mod win_api;
-#[cfg(windows)] mod win_api_trait;
+#[cfg(windows)] #[allow(dead_code)] mod win_api_trait;
 #[cfg(windows)] mod swallow_latch;
 mod platform;
 mod tray;
@@ -70,6 +71,12 @@ fn main() {
         }
     }
     logger.init();
+
+    #[cfg(windows)]
+    if !elevate::wait_for_previous() {
+        show_startup_error("The previous instance did not exit.");
+        return;
+    }
 
     #[cfg(target_os = "windows")]
     let _instance = match acquire_instance() {

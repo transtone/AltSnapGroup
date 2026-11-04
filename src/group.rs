@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Identifies a window for matching purposes
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 #[derive(Debug, Clone)]
 pub struct WindowMatcher {
     /// The process executable name (e.g., "Code.exe")
@@ -21,6 +22,7 @@ impl WindowMatcher {
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn by_title(title: &str) -> Self {
         Self {
             process_name: None,
@@ -65,6 +67,7 @@ impl MovementMode {
 }
 
 /// A group of windows that should be bound together
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 #[derive(Debug, Clone)]
 pub struct WindowGroup {
     pub id: String,
@@ -94,6 +97,7 @@ impl WindowGroup {
     }
 
     /// Check if a window matches any matcher in this group
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn matches_window(&self, window: &TrackedWindow) -> bool {
         if !self.enabled {
             return false;
@@ -114,6 +118,7 @@ impl WindowGroup {
 }
 
 /// Manages all window groups and runtime state
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub struct GroupManager {
     pub global_sync_move: bool,
     /// Defined groups
@@ -140,6 +145,7 @@ impl GroupManager {
             .map(|group| group.movement.effective(self.global_sync_move)).unwrap_or(false)
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn add_group(&mut self, group: WindowGroup) {
         self.groups.push(group);
     }
@@ -150,6 +156,7 @@ impl GroupManager {
     }
 
     /// Register a live window handle to a group
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn bind_window(&mut self, hwnd: isize, group_id: &str) {
         self.active_bindings.insert(hwnd, group_id.to_string());
     }
@@ -178,6 +185,7 @@ impl GroupManager {
     }
 
     /// Try to match a window to a group and auto-bind it
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn try_auto_bind(&mut self, window: &TrackedWindow) -> Option<String> {
         for group in &self.groups {
             if group.matches_window(window) {
@@ -218,6 +226,7 @@ impl GroupManager {
     }
 
     /// Get a snapshot of all groups for serialization
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn get_groups(&self) -> &[WindowGroup] {
         &self.groups
     }

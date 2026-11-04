@@ -44,6 +44,7 @@ impl Engine {
     pub fn state(&self) -> &State {
         &self.state
     }
+    #[allow(dead_code)]
     pub fn mods(&self) -> Modifiers {
         self.mods
     }
