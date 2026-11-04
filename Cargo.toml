@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2026"
 description = "Bind multiple windows together - activate any one, all come to front"
 license = "MIT"
-repository = "https://github.com/transtone/AlwaysBindWindow"
+repository = "https://github.com/transtone/AltSnapGroup"
 
 
 
