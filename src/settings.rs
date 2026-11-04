@@ -17,6 +17,8 @@ impl HotkeyConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub move_together: bool,
     #[serde(default = "default_auto_detect")]
     pub auto_detect: bool,
     #[serde(default)]
@@ -41,6 +43,7 @@ fn default_hotkey_sync_move() -> HotkeyConfig {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            move_together: false,
             auto_detect: true,
             alt: None,
             lang: "auto".to_string(),
@@ -48,7 +51,7 @@ impl Default for Settings {
             hotkey_unbind_cursor: HotkeyConfig::new("Ctrl+Alt", "D"),
             hotkey_unbind_all: HotkeyConfig::new("Ctrl+Alt", "U"),
             hotkey_sync_move: default_hotkey_sync_move(),
-            sync_move: true,
+            sync_move: false,
             sync_minimize: true,
             auto_start: false,
         }
@@ -200,12 +203,15 @@ pub fn set_auto_start(enable: bool) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(target_os = "windows")]
 fn set_auto_start_windows(enable: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+    use windows::Win32::System::Threading::CREATE_NO_WINDOW;
     let exe_path = std::env::current_exe()?.to_string_lossy().to_string();
 
     if enable {
         // Add to HKCU\Software\Microsoft\Windows\CurrentVersion\Run
         Command::new("reg")
+            .creation_flags(CREATE_NO_WINDOW.0)
             .args(["add",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
                 "/v", APP_NAME,
@@ -216,6 +222,7 @@ fn set_auto_start_windows(enable: bool) -> Result<(), Box<dyn std::error::Error>
     } else {
         // Remove from registry
         let _ = Command::new("reg")
+            .creation_flags(CREATE_NO_WINDOW.0)
             .args(["delete",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
                 "/v", APP_NAME,
@@ -261,7 +268,10 @@ fn set_auto_start_macos(enable: bool) -> Result<(), Box<dyn std::error::Error>> 
 pub fn is_auto_start_enabled() -> bool {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        use windows::Win32::System::Threading::CREATE_NO_WINDOW;
         std::process::Command::new("reg")
+            .creation_flags(CREATE_NO_WINDOW.0)
             .args(["query",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
                 "/v", APP_NAME])

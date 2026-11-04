@@ -7,6 +7,7 @@ use std::time::Instant;
 use windows::Win32::Foundation::*;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
 use windows::Win32::System::Threading::*;
 use windows::Win32::Graphics::Dwm::*;
@@ -63,6 +64,18 @@ fn detect_windows(gm: &Arc<Mutex<GroupManager>>, desktop: &IVirtualDesktopManage
         }
     }
     if let Ok(mut manager) = gm.lock() {
+        for (&handle, group_id) in &manager.active_bindings {
+            let hwnd = HWND(handle as *mut _);
+            if unsafe { IsWindow(hwnd).as_bool() && IsIconic(hwnd).as_bool() } {
+                if let (Some(group), Ok(id)) = (manager.groups.iter().find(|g| &g.id == group_id), unsafe { desktop.GetWindowDesktopId(hwnd) }) {
+                    let key = format!("{id:?}");
+                    if group.name == key {
+                        let members = by_desktop.entry(key).or_default();
+                        if !members.iter().any(|item| item.0 == handle) { members.push((handle, String::new(), String::new())); }
+                    }
+                }
+            }
+        }
         if replace_detected_groups(&mut manager, by_desktop) { notify_groups_changed(); }
     }
 }
@@ -77,7 +90,7 @@ fn replace_detected_groups(manager: &mut GroupManager, by_desktop: HashMap<Strin
         manager.active_bindings.clear();
         for (id, windows) in by_desktop {
             if windows.len() >= 2 {
-                manager.create_group_from_hwnds(&id, windows, crate::group::MovementMode::Off, false);
+                manager.create_group_from_hwnds(&id, windows, crate::group::MovementMode::Inherit, true);
             }
         }
         true
@@ -109,9 +122,47 @@ static LAST_FG_SYNC_MS: AtomicIsize = AtomicIsize::new(0);
 static START_INSTANT: OnceLock<Instant> = OnceLock::new();
 static MOVE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static MOVE_CACHE_DIRTY: AtomicBool = AtomicBool::new(false);
-pub fn alt_move_begin(_: isize) {}
+static ALT_TARGET: AtomicIsize = AtomicIsize::new(0);
+pub fn alt_move_begin(target: isize) { ALT_TARGET.store(target, Ordering::SeqCst); MOVE_CACHE_DIRTY.store(true, Ordering::SeqCst); }
 pub fn alt_move_update(_: isize) {}
-pub fn alt_move_end(_: isize) {}
+pub fn alt_move_end(_: isize) { ALT_TARGET.store(0, Ordering::SeqCst); MOVE_CACHE_DIRTY.store(true, Ordering::SeqCst); }
+
+fn move_sync_loop(gm: Arc<Mutex<GroupManager>>) {
+    let mut previous: Option<(isize, RECT)> = None;
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(8));
+        if MOVE_CACHE_DIRTY.swap(false, Ordering::SeqCst) { previous = None; }
+        let alt = ALT_TARGET.load(Ordering::SeqCst);
+        let held = unsafe { GetAsyncKeyState(1) as u16 & 0x8000 != 0 };
+        if !held && alt == 0 { previous = None; continue; }
+        let hwnd = if alt != 0 { HWND(alt as *mut _) } else { unsafe { GetForegroundWindow() } };
+        if hwnd.0.is_null() { previous = None; continue; }
+        let handle = hwnd.0 as isize;
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut rect).is_err() || IsIconic(hwnd).as_bool() } { previous = None; continue; }
+        let old = previous.replace((handle, rect));
+        let Some((old_handle, before)) = old else { continue; };
+        if old_handle != handle || rect.right-rect.left != before.right-before.left || rect.bottom-rect.top != before.bottom-before.top { continue; }
+        let (dx, dy) = (rect.left-before.left, rect.top-before.top);
+        if dx == 0 && dy == 0 { continue; }
+        let Ok(manager) = gm.lock() else { continue; };
+        let Some(id) = manager.find_group_for_hwnd(handle) else { continue; };
+        if !manager.movement_enabled(id) { continue; }
+        let siblings = manager.get_sibling_hwnds(handle);
+        drop(manager);
+        MOVE_IN_PROGRESS.store(true, Ordering::SeqCst);
+        for h in siblings {
+            let other = HWND(h as *mut _);
+            let mut r = RECT::default();
+            unsafe {
+                if !IsWindow(other).as_bool() || IsIconic(other).as_bool() || GetWindowRect(other, &mut r).is_err() { continue; }
+                let (x,y) = reachable_position(other, r.left+dx, r.top+dy, r.right-r.left);
+                let _ = SetWindowPos(other, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
+        MOVE_IN_PROGRESS.store(false, Ordering::SeqCst);
+    }
+}
 
 const FG_DEBOUNCE_MS: isize = 150;
 
@@ -305,8 +356,27 @@ unsafe extern "system" fn win_event_callback(
             drop(gm);
             bring_group_to_front(hv, &all);
         }
+
         0x8001 => {
             if let Ok(mut gm) = gm_arc.try_lock() { gm.unbind_window(hv); }
+        }
+        0x0016 | 0x0017 => {
+            let gm = match gm_arc.try_lock() { Ok(g) => g, Err(_) => return };
+            if !gm.global_sync_move { return; }
+            let siblings = gm.get_sibling_hwnds(hv);
+            if siblings.is_empty() { return; }
+            let Ok(desktop) = CoCreateInstance::<_, IVirtualDesktopManager>(&VirtualDesktopManager, None, CLSCTX_ALL) else { return; };
+            let Ok(id) = desktop.GetWindowDesktopId(hwnd) else { return; };
+            if !desktop.IsWindowOnCurrentVirtualDesktop(hwnd).map(|v| v.as_bool()).unwrap_or(false) { return; }
+            drop(gm);
+            SUPPRESSED.store(true, Ordering::SeqCst);
+            for h in siblings {
+                let other = HWND(h as *mut _);
+                if !IsWindow(other).as_bool() || desktop.GetWindowDesktopId(other).ok() != Some(id) { continue; }
+                if event == 0x0016 && !IsIconic(other).as_bool() { let _ = ShowWindow(other, SW_MINIMIZE); }
+                if event == 0x0017 && IsIconic(other).as_bool() { let _ = ShowWindow(other, SW_RESTORE); }
+            }
+            SUPPRESSED.store(false, Ordering::SeqCst);
         }
         _ => {}
     }
@@ -315,6 +385,9 @@ unsafe extern "system" fn win_event_callback(
 pub fn start_monitor(gm: Arc<Mutex<GroupManager>>) -> Result<(), Box<dyn std::error::Error>> {
     GROUP_MANAGER.set(gm.clone()).map_err(|_| "init")?;
     START_INSTANT.set(Instant::now()).map_err(|_| "init")?;
+
+    let move_manager = gm.clone();
+    std::thread::spawn(move || move_sync_loop(move_manager));
 
     let (tx, rx) = std::sync::mpsc::channel();
     let _ = DETECT_TX.set(tx);

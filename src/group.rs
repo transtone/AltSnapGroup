@@ -53,7 +53,6 @@ pub enum MovementMode {
 impl MovementMode {
     pub const ALL: [Self; 3] = [Self::Inherit, Self::On, Self::Off];
 
-    #[cfg(any(not(windows), test))]
     pub fn effective(self, global: bool) -> bool {
         match self { Self::Inherit => global, Self::On => true, Self::Off => false }
     }
@@ -141,7 +140,6 @@ impl GroupManager {
         }
     }
 
-    #[cfg(any(not(windows), test))]
     pub fn movement_enabled(&self, group_id: &str) -> bool {
         self.groups.iter().find(|group| group.id == group_id)
             .map(|group| group.movement.effective(self.global_sync_move)).unwrap_or(false)

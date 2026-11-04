@@ -11,10 +11,13 @@ Automatically bring snapped windows on the same virtual desktop to the front tog
 ### 功能
 
 - **自动绑定贴靠窗口**：同一虚拟桌面上被 Windows 标记为贴靠的窗口合并为一个绑定组；不足两个窗口时不建立组。即使它们属于不同的 Windows 贴靠组，也会合并。不同虚拟桌面的窗口不会混组。
-- **一起显示**：激活绑定组中的窗口时，程序将同组其他未最小化窗口前置。不会同步移动、调整大小或最小化，也不会自动恢复已最小化的成员。
-- **Alt 窗口操作**：默认按住 `Alt` 加鼠标左键拖动窗口，或按住 `Alt` 加鼠标右键调整窗口大小。只操作当前窗口，不带动绑定组的其他窗口。
+- **一起显示**：激活绑定组中的窗口时，程序将同组其他未最小化窗口前置。
+- **同步移动/最小化**：通过托盘开关启用，默认关闭。开启后，移动或最小化组内窗口时，同组窗口跟随；恢复窗口时尝试恢复同组已最小化窗口。调整大小不联动。
+- **Alt 窗口操作**：默认按住 `Alt` 加鼠标左键拖动窗口，或按住 `Alt` 加鼠标右键调整窗口大小。开启同步移动后，Alt 左键拖动也会带动同组窗口；调整大小只影响当前窗口。
 
 程序使用 Windows 的 `IsWindowArranged` 检测单个窗口的贴靠状态，并不是读取 Windows 贴靠组成员。如果旧贴靠布局仍然保留，其窗口也可能加入绑定组。
+
+已知问题：最小化并恢复后，绑定组可能失效；该问题尚在排查。
 
 ### 使用
 
@@ -22,6 +25,7 @@ Automatically bring snapped windows on the same virtual desktop to the front tog
 2. 在 Windows 中将至少两个窗口贴靠。默认启用自动检测：启动时检测一次，之后根据窗口事件更新绑定组，无需手动选窗。
 3. 右键托盘图标，展开 **绑定组** 查看各桌面的窗口标题。菜单中的“桌面 1”等只是列表编号，不保证与 Windows 桌面顺序一致。
 4. 激活组中任一窗口，同组其他未最小化窗口会一起前置。
+5. 如需同步移动和最小化，在托盘中启用 **同步移动/最小化**；关闭后两种操作均不联动。
 
 ### 自动与手动检测
 
@@ -55,10 +59,13 @@ cargo build --release
 ### Features
 
 - **Automatic grouping:** All windows that Windows reports as arranged on the same virtual desktop form one group when at least two are present. Separate Windows snap groups on that desktop are combined; windows on different virtual desktops remain separate.
-- **Show together:** Activating a group member brings its non-minimized peers forward. Moving, resizing, minimizing, and restoring windows are not synchronized; minimized peers are not automatically restored.
-- **Alt window controls:** By default, hold `Alt` and drag with the left mouse button to move a window, or with the right mouse button to resize it. Other group members do not follow.
+- **Show together:** Activating a group member brings its non-minimized peers forward.
+- **Move/minimize together:** Enable this tray option to move or minimize group members together and attempt to restore minimized peers. It is off by default; resizing is not synchronized.
+- **Alt window controls:** By default, hold `Alt` and drag with the left mouse button to move a window, or with the right mouse button to resize it. With synchronized movement enabled, Alt-left dragging also moves group members; resizing affects only the current window.
 
 The application detects each window's arranged state using Windows `IsWindowArranged`; it does not read Windows snap-group membership. Windows from an older snap layout may also be included if Windows still reports them as arranged.
+
+Known issue: a group may stop working after windows are minimized and restored; this is still under investigation.
 
 ### Getting started
 
@@ -66,6 +73,7 @@ The application detects each window's arranged state using Windows `IsWindowArra
 2. Snap at least two windows in Windows. Automatic detection is enabled by default: the app scans on startup and updates after relevant window events.
 3. Right-click the tray icon and expand **Window groups** to see member titles. The displayed desktop numbers are list labels, not guaranteed Windows desktop numbers.
 4. Activate a member to bring its non-minimized peers forward.
+5. To synchronize movement and minimizing, enable **Move/minimize together** in the tray. Both are disabled when the option is off.
 
 ### Detection modes
 

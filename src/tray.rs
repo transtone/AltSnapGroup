@@ -64,6 +64,9 @@ fn build_menu(settings: &Settings, gm: &GroupManager, _registered: [bool; 4]) ->
         let _ = menu.append(&CheckMenuItem::with_id(ID_AUTO_DETECT, if zh { "自动检测贴靠窗口" } else { "Automatically detect snapped windows" }, true, settings.auto_detect, None));
         let label = format!("{} ({})", if zh { "立即检测" } else { "Detect now" }, settings::format_hotkey(&settings.hotkey_bind));
         let _ = menu.append(&MenuItem::with_id(ID_LASSO, label, !settings.auto_detect, None));
+        let _ = menu.append(&CheckMenuItem::with_id(ID_SYNC_MOVE, if zh { "同步移动/最小化" } else { "Move/minimize together" }, true, settings.move_together, None));
+
+
         let groups_menu = Submenu::new(if zh { "绑定组" } else { "Window groups" }, true);
         if gm.groups.is_empty() {
             let _ = groups_menu.append(&MenuItem::new(if zh { "暂无绑定组" } else { "No groups" }, false, None));
@@ -409,11 +412,17 @@ impl ApplicationHandler for App {
 impl App {
     fn toggle_sync_move(&mut self) {
         let mut updated = self.settings.clone();
-        updated.sync_move = !updated.sync_move;
+        #[cfg(windows)]
+        { updated.move_together = !updated.move_together; }
+        #[cfg(not(windows))]
+        { updated.sync_move = !updated.sync_move; }
         match settings::save(&updated) {
             Ok(()) => {
                 self.settings = updated;
-                self.gm.lock().unwrap().global_sync_move = self.settings.sync_move;
+                #[cfg(windows)]
+                { self.gm.lock().unwrap().global_sync_move = self.settings.move_together; }
+                #[cfg(not(windows))]
+                { self.gm.lock().unwrap().global_sync_move = self.settings.sync_move; }
                 info!("Sync movement: {}", self.settings.sync_move);
             }
             Err(e) => {
@@ -538,7 +547,10 @@ pub fn run_tray(gm: Arc<Mutex<GroupManager>>, settings: Settings) -> Result<(), 
         let _ = menu_proxy.send_event(());
     }));
 
-    gm.lock().unwrap().global_sync_move = settings.sync_move;
+    #[cfg(windows)]
+    { gm.lock().unwrap().global_sync_move = settings.move_together; }
+    #[cfg(not(windows))]
+    { gm.lock().unwrap().global_sync_move = settings.sync_move; }
     let hk_mgr = GlobalHotKeyManager::new()?;
     // An occupied shortcut must not block the event loop or disable other actions.
     let registered = register_configured_hotkeys(&settings, |hk| hk_mgr.register(hk));
