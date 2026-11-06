@@ -67,6 +67,36 @@ pub unsafe fn resolve_target(cursor: Point) -> Option<DragTarget> {
     })
 }
 
+pub unsafe fn resolve_drag_target(cursor: Point) -> Option<DragTarget> {
+    let target = resolve_target(cursor)?;
+    let hwnd = win_api::id_to_hwnd(target.hwnd);
+    let arranged = windows::Win32::UI::WindowsAndMessaging::IsWindowArranged(hwnd).as_bool();
+    filter_drag_target(target, arranged)
+}
+
+fn filter_drag_target(target: DragTarget, arranged: bool) -> Option<DragTarget> {
+    (!target.is_maximized && !arranged).then_some(target)
+}
+
+#[cfg(test)]
+mod drag_target_tests {
+    use super::*;
+
+    #[test]
+    fn maximized_and_arranged_windows_are_not_drag_targets() {
+        let target = DragTarget {
+            hwnd: WindowId(1), initial_rect: Rect { left: 0, top: 0, right: 100, bottom: 100 },
+            is_maximized: false, exclude: false, monitor_snapshot: None,
+        };
+        assert!(filter_drag_target(target.clone(), false).is_some());
+        assert!(filter_drag_target(target.clone(), true).is_none());
+        let mut maximized = target;
+        maximized.is_maximized = true;
+        assert!(filter_drag_target(maximized.clone(), false).is_none());
+        assert!(filter_drag_target(maximized, true).is_none());
+    }
+}
+
 /// Outcome returned by `apply_actions`.
 ///
 /// `swallow` is fed back to the Windows low-level hook as the "suppress this

@@ -117,6 +117,18 @@ fn armed_plus_left_down_on_excluded_window_does_not_begin_drag() {
 }
 
 #[test]
+fn missing_drag_target_passes_both_buttons_through() {
+    let mut e = Engine::new(EngineConfig::default());
+    e.handle(Event::KeyChange { vk: VirtualKey::Alt, down: true });
+    let cursor = Point { x: 150, y: 150 };
+    assert!(e.handle(Event::LeftDown { cursor, target: None }).is_empty());
+    assert!(e.handle(Event::LeftUp).is_empty());
+    assert!(e.handle(Event::RightDown { cursor, target: None }).is_empty());
+    assert!(e.handle(Event::RightUp).is_empty());
+    assert!(matches!(e.state(), State::Armed));
+}
+
+#[test]
 fn mouse_move_during_moving_emits_update_drag() {
     let mut e = Engine::new(EngineConfig::default());
     e.handle(Event::KeyChange {

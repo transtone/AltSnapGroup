@@ -82,7 +82,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let event = match wparam.0 as u32 {
         WM_MOUSEMOVE => Some(Event::MouseMove { cursor }),
         WM_LBUTTONDOWN => {
-            let target = crate::snap_adapter::resolve_target(cursor);
+            let target = crate::snap_adapter::resolve_drag_target(cursor);
             Some(Event::LeftDown { cursor, target })
         }
         WM_LBUTTONUP => Some(Event::LeftUp),
@@ -91,7 +91,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
             Some(Event::MiddleDown { cursor, target })
         }
         WM_RBUTTONDOWN => {
-            let target = crate::snap_adapter::resolve_target(cursor);
+            let target = crate::snap_adapter::resolve_drag_target(cursor);
             Some(Event::RightDown { cursor, target })
         }
         WM_RBUTTONUP => Some(Event::RightUp),
