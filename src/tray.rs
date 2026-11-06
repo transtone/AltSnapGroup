@@ -86,7 +86,11 @@ fn build_menu(settings: &Settings, gm: &GroupManager, _registered: [bool; 4]) ->
         let _ = menu.append(&MenuItem::with_id(ID_TOGGLE_LANG, t("menu.lang"), true, None));
         let _ = menu.append(&MenuItem::with_id(ID_SNAP_RELOAD, if zh { "重新加载 Alt 配置" } else { "Reload Alt configuration" }, true, None));
         let _ = menu.append(&MenuItem::with_id(ID_SNAP_CONFIG, if zh { "编辑 Alt 配置" } else { "Edit Alt configuration" }, true, None));
-        let _ = menu.append(&MenuItem::with_id(ID_RESTART_ELEVATED, if zh { "以管理员身份重新启动" } else { "Restart as administrator" }, true, None));
+        let elevated = crate::elevate::is_elevated().unwrap_or_else(|error| {
+            error!("Could not determine elevation status: {error}");
+            false
+        });
+        let _ = menu.append(&MenuItem::with_id(ID_RESTART_ELEVATED, if zh { "以管理员身份重新启动" } else { "Restart as administrator" }, !elevated, None));
         let _ = menu.append(&CheckMenuItem::with_id(ID_TOGGLE_AUTOSTART, if zh { "开机自启" } else { "Auto Start" }, true, settings.auto_start, None));
         let _ = menu.append(&MenuItem::with_id(ID_QUIT, t("menu.quit"), true, None));
         menu

@@ -15,9 +15,6 @@ static LAST_BALLOON_EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
 static DRAG_STATE: AtomicBool = AtomicBool::new(false);
 
 
-static RESIZING: AtomicBool = AtomicBool::new(false);
-
-
 static MOVE_HWND: AtomicU64 = AtomicU64::new(0);
 
 static SWALLOW_LATCH: std::sync::OnceLock<SwallowLatch> = std::sync::OnceLock::new();
@@ -98,12 +95,10 @@ pub fn apply_actions(actions: &[Action]) -> AdapterOutcome {
         match a {
             Action::BeginDrag { hwnd, mode, initial_rect, .. } => unsafe {
                 let resizing = matches!(mode, DragMode::Resize { .. });
-                if resizing && !crate::resize_worker::begin(*hwnd, *initial_rect) {
+                if !crate::resize_worker::begin(*hwnd, *initial_rect, resizing) {
                     outcome.re_entry.push(Event::DragAborted { reason: DragAbortReason::ApplyGeometryFailed });
                     break;
                 }
-                RESIZING.store(resizing, Ordering::Relaxed);
-
                 DRAG_STATE.store(true, Ordering::Relaxed);
 
                 if *mode == DragMode::Move {
@@ -112,12 +107,8 @@ pub fn apply_actions(actions: &[Action]) -> AdapterOutcome {
                 }
                 win_api::capture_mouse(crate::snap_tool_window::hwnd());
             },
-            Action::UpdateDrag { hwnd, new_rect } => unsafe {
-                let ok = if RESIZING.load(Ordering::Relaxed) {
-                    crate::resize_worker::update(*new_rect)
-                } else {
-                    win_api::set_window_rect(win_api::id_to_hwnd(*hwnd), *new_rect)
-                };
+            Action::UpdateDrag { hwnd, new_rect } => {
+                let ok = crate::resize_worker::update(*new_rect);
 
                 if ok && MOVE_HWND.load(Ordering::Relaxed) == hwnd.0 {
                     crate::platform::windows::alt_move_update(hwnd.0 as isize);
@@ -132,7 +123,7 @@ pub fn apply_actions(actions: &[Action]) -> AdapterOutcome {
                 }
             },
             Action::EndDrag { hwnd } => unsafe {
-                if RESIZING.swap(false, Ordering::Relaxed) { crate::resize_worker::end(); }
+                crate::resize_worker::end();
                 if MOVE_HWND.swap(0, Ordering::Relaxed) == hwnd.0 {
                     crate::platform::windows::alt_move_end(hwnd.0 as isize);
                 }
@@ -177,8 +168,7 @@ pub fn apply_actions(actions: &[Action]) -> AdapterOutcome {
                 crate::snap_overlay::hide();
             }
             Action::ApplySnapRect { hwnd, rect } => {
-                let h = win_api::id_to_hwnd(*hwnd);
-                if unsafe { win_api::set_window_rect(h, *rect) } {
+                if crate::resize_worker::update(*rect) {
                     if MOVE_HWND.load(Ordering::Relaxed) == hwnd.0 {
                         crate::platform::windows::alt_move_update(hwnd.0 as isize);
                     }

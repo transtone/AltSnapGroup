@@ -1,8 +1,25 @@
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
 use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_NOCLOSEPROCESS};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+pub fn is_elevated() -> windows::core::Result<bool> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)?;
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut length = 0;
+        let result = GetTokenInformation(token, TokenElevation,
+            Some(&mut elevation as *mut _ as *mut _),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32, &mut length);
+        let _ = CloseHandle(token);
+        result.map(|()| elevation.TokenIsElevated != 0)
+    }
+}
 
 pub fn wait_for_previous() -> bool {
     let mut args = std::env::args().skip(1);

@@ -1,4 +1,4 @@
-//! Coalesce resize work outside the low-level mouse hook. The final queued rect
+//! Coalesce geometry work outside the low-level mouse hook. The final queued rect
 //! is applied before a session becomes available to the next gesture.
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use crate::engine::{geometry::Rect, state::WindowId};
@@ -6,15 +6,16 @@ use crate::engine::{geometry::Rect, state::WindowId};
 #[derive(Default)]
 struct Pending {
     hwnd: Option<WindowId>,
+    resizing: bool,
     rect: Option<Rect>,
     last: Option<Rect>,
     ending: bool,
     failed: bool,
 }
 impl Pending {
-    fn begin(&mut self, hwnd: WindowId, rect: Rect) -> bool {
+    fn begin(&mut self, hwnd: WindowId, rect: Rect, resizing: bool) -> bool {
         if self.hwnd.is_some() { return false; }
-        *self = Self { hwnd: Some(hwnd), last: Some(rect), ..Self::default() };
+        *self = Self { hwnd: Some(hwnd), resizing, last: Some(rect), ..Self::default() };
         true
     }
     fn update(&mut self, rect: Rect) -> bool {
@@ -47,8 +48,8 @@ pub fn finishing() -> bool {
     WORKER.get().and_then(Option::as_ref)
         .is_some_and(|w| w.pending.lock().unwrap().ending)
 }
-pub fn begin(hwnd: WindowId, rect: Rect) -> bool {
-    worker().is_some_and(|w| w.pending.lock().unwrap().begin(hwnd, rect))
+pub fn begin(hwnd: WindowId, rect: Rect, resizing: bool) -> bool {
+    worker().is_some_and(|w| w.pending.lock().unwrap().begin(hwnd, rect, resizing))
 }
 pub fn update(rect: Rect) -> bool {
     worker().is_some_and(|w| {
@@ -71,14 +72,19 @@ fn run(worker: Arc<Worker>) {
             pending = worker.ready.wait(pending).unwrap();
         }
         if let Some((hwnd, rect)) = pending.take() {
+            let resizing = pending.resizing;
             drop(pending);
-            let ok = unsafe { crate::win_api::resize_window_rect(crate::win_api::id_to_hwnd(hwnd), rect) };
+            let ok = unsafe {
+                let hwnd = crate::win_api::id_to_hwnd(hwnd);
+                if resizing { crate::win_api::resize_window_rect(hwnd, rect) }
+                else { crate::win_api::set_window_rect(hwnd, rect) }
+            };
             pending = worker.pending.lock().unwrap();
             if ok { pending.last = Some(rect); }
             else {
                 pending.failed = true;
                 pending.rect = None;
-                log::warn!("Could not resize the target window");
+                log::warn!("Could not update the target window geometry");
             }
         }
         // New moves can arrive while the target processes SetWindowPos.
@@ -92,38 +98,39 @@ mod tests {
     #[test]
     fn final_pending_size_precedes_next_session() {
         let mut p = Pending::default();
-        assert!(p.begin(WindowId(1), rect(100)));
+        assert!(p.begin(WindowId(1), rect(100), true));
         assert!(p.update(rect(110)));
         assert!(p.update(rect(120)));
         p.ending = true;
-        assert!(!p.begin(WindowId(2), rect(200)));
+        assert!(!p.begin(WindowId(2), rect(200), true));
         assert!(!p.update(rect(130)));
         assert_eq!(p.take(), Some((WindowId(1), rect(120))));
         assert!(p.rect.is_none());
         p.settle();
-        assert!(p.begin(WindowId(2), rect(200)));
+        assert!(p.begin(WindowId(2), rect(200), true));
     }
     #[test]
     fn release_during_in_flight_update_preserves_latest_rectangle() {
         let mut p = Pending::default();
-        assert!(p.begin(WindowId(1), rect(100)));
+        assert!(p.begin(WindowId(1), rect(100), false));
+        assert!(!p.resizing);
         assert!(p.update(rect(110)));
         let (_, in_flight) = p.take().unwrap();
         assert!(p.update(rect(130)));
         p.ending = true;
         p.last = Some(in_flight);
         p.settle();
-        assert!(!p.begin(WindowId(2), rect(200)));
+        assert!(!p.begin(WindowId(2), rect(200), true));
         assert_eq!(p.take(), Some((WindowId(1), rect(130))));
         p.last = Some(rect(130));
         p.settle();
-        assert!(p.begin(WindowId(2), rect(200)));
+        assert!(p.begin(WindowId(2), rect(200), true));
     }
     #[test]
     fn unchanged_and_failed_updates_are_not_applied() {
         let mut p = Pending::default();
         assert!(!p.update(rect(90)));
-        assert!(p.begin(WindowId(1), rect(100)));
+        assert!(p.begin(WindowId(1), rect(100), true));
         assert!(p.update(rect(100)));
         assert!(p.take().is_none());
         p.failed = true;
