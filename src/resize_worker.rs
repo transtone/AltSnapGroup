@@ -7,15 +7,17 @@ use crate::engine::{geometry::Rect, state::WindowId};
 struct Pending {
     hwnd: Option<WindowId>,
     resizing: bool,
+    move_session: Option<u64>,
+    move_started: bool,
     rect: Option<Rect>,
     last: Option<Rect>,
     ending: bool,
     failed: bool,
 }
 impl Pending {
-    fn begin(&mut self, hwnd: WindowId, rect: Rect, resizing: bool) -> bool {
+    fn begin(&mut self, hwnd: WindowId, rect: Rect, resizing: bool, move_session: Option<u64>) -> bool {
         if self.hwnd.is_some() { return false; }
-        *self = Self { hwnd: Some(hwnd), resizing, last: Some(rect), ..Self::default() };
+        *self = Self { hwnd: Some(hwnd), resizing, move_session, last: Some(rect), ..Self::default() };
         true
     }
     fn update(&mut self, rect: Rect) -> bool {
@@ -23,8 +25,12 @@ impl Pending {
         self.rect = Some(rect);
         true
     }
-    fn settle(&mut self) {
-        if self.ending && self.rect.is_none() { *self = Self::default(); }
+    fn settle(&mut self) -> Option<(WindowId, u64)> {
+        if self.ending && self.rect.is_none() {
+            let completed = self.hwnd.zip(self.move_session);
+            *self = Self::default();
+            completed
+        } else { None }
     }
     fn take(&mut self) -> Option<(WindowId, Rect)> {
         let rect = self.rect.take()?;
@@ -48,8 +54,8 @@ pub fn finishing() -> bool {
     WORKER.get().and_then(Option::as_ref)
         .is_some_and(|w| w.pending.lock().unwrap().ending)
 }
-pub fn begin(hwnd: WindowId, rect: Rect, resizing: bool) -> bool {
-    worker().is_some_and(|w| w.pending.lock().unwrap().begin(hwnd, rect, resizing))
+pub fn begin(hwnd: WindowId, rect: Rect, resizing: bool, move_session: Option<u64>) -> bool {
+    worker().is_some_and(|w| w.pending.lock().unwrap().begin(hwnd, rect, resizing, move_session))
 }
 pub fn update(rect: Rect) -> bool {
     worker().is_some_and(|w| {
@@ -71,6 +77,12 @@ fn run(worker: Arc<Worker>) {
         while pending.rect.is_none() && !pending.ending {
             pending = worker.ready.wait(pending).unwrap();
         }
+        if let (Some(hwnd), Some(session), false) = (pending.hwnd, pending.move_session, pending.move_started) {
+            pending.move_started = true;
+            drop(pending);
+            crate::platform::windows::alt_move_start(hwnd.0 as isize, session);
+            pending = worker.pending.lock().unwrap();
+        }
         if let Some((hwnd, rect)) = pending.take() {
             let resizing = pending.resizing;
             drop(pending);
@@ -88,7 +100,11 @@ fn run(worker: Arc<Worker>) {
             }
         }
         // New moves can arrive while the target processes SetWindowPos.
-        pending.settle();
+        let completed = pending.settle();
+        drop(pending);
+        if let Some((hwnd, session)) = completed {
+            crate::platform::windows::alt_move_complete(hwnd.0 as isize, session);
+        }
     }
 }
 #[cfg(test)]
@@ -98,21 +114,21 @@ mod tests {
     #[test]
     fn final_pending_size_precedes_next_session() {
         let mut p = Pending::default();
-        assert!(p.begin(WindowId(1), rect(100), true));
+        assert!(p.begin(WindowId(1), rect(100), true, None));
         assert!(p.update(rect(110)));
         assert!(p.update(rect(120)));
         p.ending = true;
-        assert!(!p.begin(WindowId(2), rect(200), true));
+        assert!(!p.begin(WindowId(2), rect(200), true, None));
         assert!(!p.update(rect(130)));
         assert_eq!(p.take(), Some((WindowId(1), rect(120))));
         assert!(p.rect.is_none());
         p.settle();
-        assert!(p.begin(WindowId(2), rect(200), true));
+        assert!(p.begin(WindowId(2), rect(200), true, None));
     }
     #[test]
     fn release_during_in_flight_update_preserves_latest_rectangle() {
         let mut p = Pending::default();
-        assert!(p.begin(WindowId(1), rect(100), false));
+        assert!(p.begin(WindowId(1), rect(100), false, None));
         assert!(!p.resizing);
         assert!(p.update(rect(110)));
         let (_, in_flight) = p.take().unwrap();
@@ -120,20 +136,31 @@ mod tests {
         p.ending = true;
         p.last = Some(in_flight);
         p.settle();
-        assert!(!p.begin(WindowId(2), rect(200), true));
+        assert!(!p.begin(WindowId(2), rect(200), true, None));
         assert_eq!(p.take(), Some((WindowId(1), rect(130))));
         p.last = Some(rect(130));
         p.settle();
-        assert!(p.begin(WindowId(2), rect(200), true));
+        assert!(p.begin(WindowId(2), rect(200), true, None));
     }
     #[test]
     fn unchanged_and_failed_updates_are_not_applied() {
         let mut p = Pending::default();
         assert!(!p.update(rect(90)));
-        assert!(p.begin(WindowId(1), rect(100), true));
+        assert!(p.begin(WindowId(1), rect(100), true, None));
         assert!(p.update(rect(100)));
         assert!(p.take().is_none());
         p.failed = true;
         assert!(!p.update(rect(120)));
+    }
+    #[test]
+    fn move_completion_is_emitted_only_after_last_update() {
+        let mut p = Pending::default();
+        assert!(p.begin(WindowId(1), rect(100), false, Some(7)));
+        assert!(p.update(rect(120)));
+        p.ending = true;
+        assert_eq!(p.settle(), None);
+        assert_eq!(p.take(), Some((WindowId(1), rect(120))));
+        assert_eq!(p.settle(), Some((WindowId(1), 7)));
+        assert_eq!(p.settle(), None);
     }
 }

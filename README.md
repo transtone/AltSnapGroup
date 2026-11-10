@@ -12,7 +12,7 @@ Automatically bring snapped windows on the same virtual desktop to the front tog
 
 - **自动绑定贴靠窗口**：同一虚拟桌面上被 Windows 标记为贴靠的窗口合并为一个绑定组；不足两个窗口时不建立组。即使它们属于不同的 Windows 贴靠组，也会合并。不同虚拟桌面的窗口不会混组。
 - **一起显示**：激活绑定组中的窗口时，程序将同组其他未最小化窗口前置。
-- **同步移动/最小化**：通过托盘开关启用，默认关闭。开启后，移动或最小化组内窗口时，同组窗口跟随；恢复窗口时尝试恢复同组已最小化窗口。调整大小不联动。
+- **同步移动/最小化**：通过托盘开关启用，默认关闭。开启后，移动或最小化组内窗口时，同组窗口跟随；恢复窗口时尝试恢复同组已最小化窗口。调整大小不联动。同步移动会保持窗口间的相对位置，跟随窗口可能移出屏幕；可通过托盘找回。
 - **Alt 窗口操作**：默认按住 `Alt` 加鼠标左键拖动窗口，或按住 `Alt` 加鼠标右键调整窗口大小。最大化或被 Windows 标记为贴靠的窗口不响应这两种操作。开启同步移动后，Alt 左键拖动仍可带动同组窗口；调整大小只影响当前窗口。
 
 程序使用 Windows 的 `IsWindowArranged` 检测单个窗口的贴靠状态，并不是读取 Windows 贴靠组成员。如果旧贴靠布局仍然保留，其窗口也可能加入绑定组。
@@ -60,7 +60,7 @@ cargo build --release
 
 - **Automatic grouping:** All windows that Windows reports as arranged on the same virtual desktop form one group when at least two are present. Separate Windows snap groups on that desktop are combined; windows on different virtual desktops remain separate.
 - **Show together:** Activating a group member brings its non-minimized peers forward.
-- **Move/minimize together:** Enable this tray option to move or minimize group members together and attempt to restore minimized peers. It is off by default; resizing is not synchronized.
+- **Move/minimize together:** Enable this tray option to move or minimize group members together and attempt to restore minimized peers. It is off by default; resizing is not synchronized. Movement preserves relative positions, so followers may move off-screen; use the tray recovery command to bring them back.
 - **Alt window controls:** By default, hold `Alt` and drag with the left mouse button to move a window, or with the right mouse button to resize it. These operations do not apply to maximized windows or windows marked as arranged by Windows. With synchronized movement enabled, Alt-left dragging can still move group members; resizing affects only the current window.
 
 The application detects each window's arranged state using Windows `IsWindowArranged`; it does not read Windows snap-group membership. Windows from an older snap layout may also be included if Windows still reports them as arranged.

@@ -50,11 +50,23 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: AltSnapGroup-windows-x64
+      - name: Extract release notes
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $content = Get-Content CHANGELOG.md -Raw -Encoding utf8
+          $pattern = '(?ms)^## ' + [regex]::Escape($version) + '\s*\r?\n(.*?)(?=^## |\z)'
+          $match = [regex]::Match($content, $pattern)
+          if (-not $match.Success -or [string]::IsNullOrWhiteSpace($match.Groups[1].Value)) {
+            throw "No changelog entry found for $version"
+          }
+          [System.IO.File]::WriteAllText('release-notes.md', $match.Groups[1].Value.Trim(), [System.Text.UTF8Encoding]::new($false))
       - uses: softprops/action-gh-release@v2
         with:
           files: AltSnapGroup-*-windows-x64.exe
           fail_on_unmatched_files: true
-          generate_release_notes: true
+          body_path: release-notes.md
