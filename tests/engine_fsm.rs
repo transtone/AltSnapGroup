@@ -46,6 +46,18 @@ fn alt_plus_win_does_not_arm_due_to_forbidden_modifier() {
     assert!(matches!(e.state(), State::Idle));
 }
 
+#[test]
+fn stale_win_state_is_reconciled_before_drag() {
+    let mut e = Engine::new(EngineConfig::default());
+    e.handle(Event::KeyChange { vk: VirtualKey::Win, down: true });
+    e.handle(Event::KeyChange { vk: VirtualKey::Alt, down: true });
+    assert!(matches!(e.state(), State::Idle));
+    e.reconcile_win_key(false);
+    assert!(matches!(e.state(), State::Armed));
+    e.reconcile_win_key(true);
+    assert!(matches!(e.state(), State::Idle));
+}
+
 use alt3rsnap::engine::geometry::{Point, Rect};
 use alt3rsnap::engine::state::{Action, DragMode, DragTarget, WindowId};
 

@@ -7,7 +7,7 @@ use std::cell::RefCell;
 
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU,
+    GetAsyncKeyState, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU,
     VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -77,6 +77,13 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
             return LRESULT(1);
         }
         return CallNextHookEx(None, code, wparam, lparam);
+    }
+
+    if matches!(wparam.0 as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN) {
+        let win_down = GetAsyncKeyState(VK_LWIN.0 as i32) < 0
+            || GetAsyncKeyState(VK_RWIN.0 as i32) < 0;
+        let actions = ENGINE.with(|e| e.borrow_mut().reconcile_win_key(win_down));
+        crate::snap_adapter::apply_actions(&actions);
     }
 
     let event = match wparam.0 as u32 {

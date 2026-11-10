@@ -52,6 +52,10 @@ impl Engine {
         &self.config
     }
 
+    pub fn reconcile_win_key(&mut self, down: bool) -> Vec<Action> {
+        self.handle(Event::KeyChange { vk: state::VirtualKey::Win, down })
+    }
+
     /// Build a `SnapContext` + `SnapSession` for a move drag starting now, iff snap
     /// is enabled and the adapter attached a monitor snapshot. Called from LeftDown
     /// and center-move RightDown paths.
