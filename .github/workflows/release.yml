@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
+
 
 permissions:
   contents: read
@@ -16,6 +16,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Verify version tag
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw "Tag must use vMAJOR.MINOR.PATCH"
+          }
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Could not read Cargo metadata" }
+          $version = ($metadata.packages | Where-Object { $_.name -eq 'AltSnapGroup' }).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag does not match Cargo.toml version $version" }
+
       - name: Test
         run: cargo test
 
@@ -24,19 +35,18 @@ jobs:
 
       - name: Prepare executable
         shell: pwsh
-        run: Copy-Item target/x86_64-pc-windows-msvc/release/AltSnapGroup.exe AltSnapGroup-windows-x64.exe
+        run: Copy-Item target/x86_64-pc-windows-msvc/release/AltSnapGroup.exe "AltSnapGroup-$($env:GITHUB_REF_NAME.Substring(1))-windows-x64.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: AltSnapGroup-windows-x64
-          path: AltSnapGroup-windows-x64.exe
+          path: AltSnapGroup-*-windows-x64.exe
           if-no-files-found: error
 
   release:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     permissions:
       contents: write
     steps:
@@ -45,6 +55,6 @@ jobs:
           name: AltSnapGroup-windows-x64
       - uses: softprops/action-gh-release@v2
         with:
-          files: AltSnapGroup-windows-x64.exe
+          files: AltSnapGroup-*-windows-x64.exe
           fail_on_unmatched_files: true
           generate_release_notes: true
